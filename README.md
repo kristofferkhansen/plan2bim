@@ -70,10 +70,14 @@ and other room names for lifts and shafts. The rules that say what a drawn cell 
 ```sh
 uv run pytest
 PLAN2BIM_CORPUS=/path/to/projects uv run pytest tests/test_corpus.py    # your own buildings, see the file
+uv run python tests/samples.py dwg/samples                              # fetch public DWG files
+PLAN2BIM_SAMPLES=dwg/samples uv run pytest tests/test_samples.py        # read them; needs dwg2dxf
 ```
 
 The tests build the example building and compare the result with what the drawings show.
 Real drawings are not in the repository. `tests/test_corpus.py` runs them from a directory of your own.
+`tests/test_samples.py` reads public DWG files of Autodesk and LibreDWG, in each version of DWG from R14 to 2018.
+No public drawing has the area layers, so these tests read drawings and build nothing.
 
 ## Code
 
