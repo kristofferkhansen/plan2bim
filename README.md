@@ -13,6 +13,7 @@ A plan drawing holds no heights. They come from the project file.
 uv sync
 uv run plan2bim build example/example.toml      # the example building; its drawings are in the repository
 uv run plan2bim build PROJECT.toml              # your building
+uv run plan2bim export PROJECT.toml -o FILE.ifc # the IFC file only
 ```
 
 A DXF needs nothing else. A DWG needs `dwg2dxf` of LibreDWG on the `PATH`. The Docker image holds it:
@@ -25,6 +26,7 @@ docker run --rm --user "$(id -u):$(id -g)" -v "$PWD":/work plan2bim build /work/
 | Command | What it does |
 |---|---|
 | `plan2bim build PROJECT` | Builds the model and checks it. `--out DIR`, `--strict`, `--no-plots`, `-q`. |
+| `plan2bim export PROJECT` | Builds the model, checks it and writes its IFC file only. `-o FILE` (default: `NAME.ifc` in the current directory), `--strict`, `-q`. |
 | `plan2bim check PROJECT` | Checks the project file and builds nothing. It reports all problems at once. |
 | `plan2bim inspect DRAWING` | Lists the layers, the kinds of entity and the unit of a drawing. Use it for a drawing with other layer names. |
 
@@ -35,7 +37,7 @@ The outputs go to the `out` directory of the project. `NAME` is the name of the 
 
 | Output | Content |
 |---|---|
-| `NAME.html` | The model in a viewer: one file, opens from disk, no server and no network access |
+| `NAME.html` | The model in a viewer: one file, opens from disk, no server and no network access. "Save as IFC" in it saves `NAME.ifc`: the viewer holds that file. |
 | `NAME.ifc` | The model as IFC4 |
 | `NAME.txt` | The result, the registration, notes from the drawings, results of all checks |
 | `NAME.json` | The same result for a program: status, numbers of each storey, every note with its position |

@@ -1,13 +1,16 @@
 """One HTML file that shows the model in a browser.
 
-The file holds the geometry, the viewer and three.js itself. It needs no server and loads nothing from
-the network, so it can be opened from disk, mailed, or published as it is.
+The file holds the geometry, the viewer, three.js itself and the IFC file of the model. It needs no server
+and loads nothing from the network, so it can be opened from disk, mailed, or published as it is. A person
+who has this file only can save the IFC file from it.
 """
 from __future__ import annotations
 
 import base64
+import gzip
 import html
 import json
+import re
 from pathlib import Path
 
 import numpy as np
@@ -86,17 +89,21 @@ def payload(project: Project, levels: dict[str, Level], model: Model, solids: li
     }
 
 
-def write(path: Path, project: Project, levels: dict[str, Level], model: Model, solids: list[Solid]) -> int:
-    """Write the viewer and return its size in bytes."""
+def write(path: Path, project: Project, levels: dict[str, Level], model: Model, solids: list[Solid], ifc: Path) -> int:
+    """Write the viewer and return its size in bytes. `ifc` is the IFC file of the model: the viewer holds it, packed."""
     page = (HERE / "viewer.html").read_text(encoding="utf-8")
-    three = (HERE / "vendor" / "three.min.js").read_text(encoding="utf-8")
-    data = json.dumps(payload(project, levels, model, solids), separators=(",", ":"), ensure_ascii=False).replace("</", "<\\/")
-    for mark in ("__TITLE__", "__THREE__", "__DATA__"):
-        if page.count(mark) != 1:
+    data = {**payload(project, levels, model, solids), "ifc": ifc.name}
+    fill = {
+        "__TITLE__": html.escape(project.name),
+        "__THREE__": (HERE / "vendor" / "three.min.js").read_text(encoding="utf-8"),
+        "__DATA__": json.dumps(data, separators=(",", ":"), ensure_ascii=False).replace("</", "<\\/"),
+        "__IFC__": base64.b64encode(gzip.compress(ifc.read_bytes(), mtime=0)).decode("ascii"),
+    }
+    parts = re.split(f"({'|'.join(fill)})", page)       # the marks of the page itself, not what looks like one in a filling
+    for mark in fill:
+        if parts.count(mark) != 1:
             raise ValueError(f"viewer.html must hold {mark} once")
-    head, rest = page.split("__THREE__")
-    middle, tail = rest.split("__DATA__")
-    out = head.replace("__TITLE__", html.escape(project.name)) + three + middle + data + tail
+    out = "".join(fill.get(part, part) for part in parts)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(out, encoding="utf-8")
     return len(out.encode("utf-8"))

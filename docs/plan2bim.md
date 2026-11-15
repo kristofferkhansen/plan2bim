@@ -24,6 +24,8 @@ must be on the `PATH`. It converts each DWG to `out/dxf/KEY.dxf`. It converts a 
 is another file or has changed. The Docker image of the repository holds it.
 When `dwg2dxf` cannot convert a drawing, convert it to DXF with another tool and name the DXF in the project file.
 
+`plan2bim export PROJECT.toml -o FILE.ifc` builds the model, checks it and writes the IFC file only.
+It leaves no other file. The report of the checks comes from `build`.
 `plan2bim check PROJECT.toml` checks the project file only. `plan2bim inspect DRAWING` lists the layers,
 the kinds of entity and the unit of a drawing.
 
@@ -31,7 +33,7 @@ the kinds of entity and the unit of a drawing.
 
 | Output | Content |
 |---|---|
-| `out/NAME.html` | The model in a viewer. One file, no server, no network access. It shows storeys and categories apart, room numbers and names, the source drawing as red lines, a horizontal or a vertical section, the assumptions and the notes. |
+| `out/NAME.html` | The model in a viewer. One file, no server, no network access. It shows storeys and categories apart, room numbers and names, the source drawing as red lines, a horizontal or a vertical section, the assumptions and the notes. It holds the IFC file: "Save as IFC" saves `NAME.ifc` from it. |
 | `out/NAME.ifc` | The model as IFC4, for other BIM tools. |
 | `out/NAME.txt` | The result, the registration, everything the reader noted in the drawings, and the results of all checks. Read this file after each run. |
 | `out/NAME.json` | The same result for a program. See "Result and gates". |
@@ -82,7 +84,7 @@ A wall is not a centre line with a thickness. A wall is the area that the drawn 
 | 6 | `assemble.py` | Gives each cell its heights from the project file. Each piece of each element is a vertical prism: a plan polygon, a bottom and a top. |
 | 7 | `mesh.py` | Joins the prisms of one material, category and storey into one closed solid (manifold3d). The join removes all faces between adjoining prisms. This is why the display has no doubled faces and no flicker. |
 | 8 | `ifc.py` | Writes the IFC file: wall, opening that cuts the wall, door or window that fills the opening. Rooms are `IfcSpace`. Doors and windows carry their overall size. Rooms, walls, plates, columns, doors and windows carry base quantities. |
-| 9 | `web.py`, `viewer.html` | Writes the viewer: the solids, the viewer code and three.js r149 in one HTML file. |
+| 9 | `web.py`, `viewer.html` | Writes the viewer: the solids, the viewer code, three.js r149 and the IFC file (packed with gzip) in one HTML file. |
 | 10 | `verify.py` | Checks the finished model. See "Checks". |
 
 ### Registration
@@ -256,9 +258,9 @@ wall again. A wall cell that is not a rectangle cannot be kept exactly, and accu
 
 ## Use from a program
 
-`plan2bim/pipeline.py` holds the build as functions: `read_drawings`, `classify_storeys`, `build_model` and `run`.
-The command line calls `run`. A server can call the stages one by one, for example to show the registered
-drawings before the stairs are known.
+`plan2bim/pipeline.py` holds the build as functions: `read_drawings`, `classify_storeys`, `build_model`, `run`
+and `export`. The command line calls `run` for `build` and `export` for `export`. A server can call the stages
+one by one, for example to show the registered drawings before the stairs are known.
 
 The classification reads the stairs of the project file: a cell under a flight is a tread and not a wall.
 A classification that was made with other stairs, or with none, is a preview. Make it again when a stair changes.

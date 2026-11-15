@@ -1,18 +1,21 @@
 """The command line.
 
   plan2bim build PROJECT      build the model of a project and check it
+  plan2bim export PROJECT     build the model, check it, and write its IFC file only
   plan2bim check PROJECT      check a project file, build nothing
   plan2bim inspect DRAWING    list the layers, the kinds of entity and the unit of a drawing
 
 `build` writes, under the output directory of the project:
-  NAME.html     the model in a viewer, one file, opens from disk
+  NAME.html     the model in a viewer, one file, opens from disk; "Save as IFC" in it gives NAME.ifc
   NAME.ifc      the model as IFC4
   NAME.txt      the result, the registration, what the reader noted, and the checks
   NAME.json     the same result for a program
   qa/KEY.png    per storey, the drawing with what every cell was taken to be
 
-Exit status: 0 the build passed its checks; 1 a check failed (with --strict also when there is something
-to look at); 2 the project file, a drawing or the command is wrong; 3 an error in plan2bim itself.
+`export` writes one file: NAME.ifc in the current directory, or the file that -o names.
+
+Exit status of `build` and `export`: 0 the model passed its checks; 1 a check failed (with --strict also when
+there is something to look at); 2 the project file, a drawing or the command is wrong; 3 an error in plan2bim itself.
 """
 from __future__ import annotations
 
@@ -37,6 +40,10 @@ class _Elapsed(logging.Formatter):
         return f"{record.relativeCreated / 1000.0:6.1f} s  {record.getMessage()}"
 
 
+def _status(report, strict: bool) -> int:
+    return 1 if report.status == "fail" or (strict and report.status == "warn") else 0
+
+
 def _build(args: argparse.Namespace) -> int:
     # the geometry libraries load here, not for `check` and `inspect`
     from . import pipeline
@@ -47,8 +54,20 @@ def _build(args: argparse.Namespace) -> int:
     outcome = pipeline.run(project, Path(args.project).stem, plots=not args.no_plots)
     print("\n".join(outcome.report.result()))
     print(f"Report: {outcome.files['report']}")
-    status = outcome.report.status
-    return 1 if status == "fail" or (args.strict and status == "warn") else 0
+    return _status(outcome.report, args.strict)
+
+
+def _export(args: argparse.Namespace) -> int:
+    from . import pipeline
+
+    project = load(args.project)
+    target = Path(args.output or f"{Path(args.project).stem}.ifc").resolve()
+    with tempfile.TemporaryDirectory() as tmp:
+        project.out = Path(tmp)         # a DWG is converted there: this command leaves one file
+        report = pipeline.export(project, target)
+    print("\n".join(report.result()))
+    print(f"IFC: {target}")
+    return _status(report, args.strict)
 
 
 def _check(args: argparse.Namespace) -> int:
@@ -91,6 +110,11 @@ def main(argv: list[str] | None = None) -> int:
     build.add_argument("--strict", action="store_true", help="exit with 1 also when there is something to look at")
     build.add_argument("--no-plots", action="store_true", help="do not draw the plot of each storey")
     build.add_argument("-q", "--quiet", action="store_true", help="do not show progress")
+    export = sub.add_parser("export", help="build the model, check it, and write its IFC file only")
+    export.add_argument("project", help="project file, .toml or .json")
+    export.add_argument("-o", "--output", help="the IFC file to write (default: NAME.ifc in the current directory)")
+    export.add_argument("--strict", action="store_true", help="exit with 1 also when there is something to look at")
+    export.add_argument("-q", "--quiet", action="store_true", help="do not show progress")
     check = sub.add_parser("check", help="check a project file, build nothing")
     check.add_argument("project", help="project file, .toml or .json")
     inspect = sub.add_parser("inspect", help="list the layers, the kinds of entity and the unit of a drawing")
@@ -102,7 +126,7 @@ def main(argv: list[str] | None = None) -> int:
     log.addHandler(handler)
     log.setLevel(logging.WARNING if getattr(args, "quiet", False) else logging.INFO)
     try:
-        return {"build": _build, "check": _check, "inspect": _inspect}[args.command](args)
+        return {"build": _build, "export": _export, "check": _check, "inspect": _inspect}[args.command](args)
     except InputError as e:
         for line in str(e).splitlines():
             print(f"error: {line}", file=sys.stderr)

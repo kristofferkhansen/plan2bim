@@ -8,6 +8,7 @@ Each stage is a function of the project and of the stages before it. What each s
 | `classify_storeys` | `[[stair]]`, `[review]` |
 | `build_model` | `[heights]`, the elevations, `[[stair]]` |
 | `run` | all of the above, and `[gates]`, `author`, `organization`, `[georeference]` |
+| `export` | the same as `run`; it writes the IFC file only |
 
 The classification reads the stairs: a cell under a flight is a tread and not a wall, and a thin strip at
 a stair is a string and not a sliding door. A classification that was made with other stairs, or with
@@ -107,19 +108,31 @@ def _data(project: Project, read: Read, built: Built, report: verify.Report, fil
     }
 
 
-def run(project: Project, name: str, *, plots: bool = True) -> Outcome:
-    """Build the model and write it to `project.out`. `name` is the stem of every file written."""
+def _stages(project: Project) -> tuple[Read, dict[str, classify.Classified], Built]:
     read = read_drawings(project)
     cls = classify_storeys(project, read)
-    built = build_model(project, read, cls)
+    return read, cls, build_model(project, read, cls)
+
+
+def export(project: Project, path: Path) -> verify.Report:
+    """Build the model and write its IFC file to `path`, and nothing else. The checks are those of `run`."""
+    read, cls, built = _stages(project)
+    ifc.write(path, project, built.model)
+    log.info("%s", path)
+    return verify.run(project, read.levels, cls, built.model, built.solids, built.flights, path)
+
+
+def run(project: Project, name: str, *, plots: bool = True) -> Outcome:
+    """Build the model and write it to `project.out`. `name` is the stem of every file written."""
+    read, cls, built = _stages(project)
     out = project.out
     files = {"viewer": out / f"{name}.html", "ifc": out / f"{name}.ifc", "report": out / f"{name}.txt",
              "data": out / f"{name}.json"}
 
-    size = web.write(files["viewer"], project, read.levels, built.model, built.solids)
-    log.info("%s: %.1f MB", files["viewer"], size / 1e6)
     ifc.write(files["ifc"], project, built.model)
     log.info("%s", files["ifc"])
+    size = web.write(files["viewer"], project, read.levels, built.model, built.solids, files["ifc"])
+    log.info("%s: %.1f MB", files["viewer"], size / 1e6)
 
     report = verify.run(project, read.levels, cls, built.model, built.solids, built.flights, files["ifc"])
     noted = ["", "Noted while reading the drawings", "", *([n.text for n in built.model.notes] or ["nothing"]), ""]

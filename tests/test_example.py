@@ -1,7 +1,11 @@
 """The example building, end to end. It is drawn without a flaw, so each number below is known beforehand."""
 from __future__ import annotations
 
+import base64
+import gzip
 import json
+import re
+from collections import Counter
 
 import ifcopenshell
 import ifcopenshell.util.element
@@ -47,6 +51,28 @@ def test_ifc_file_gives_areas_and_sizes(built):
     assert sorted(d.OverallWidth for d in f.by_type("IfcDoor")) == pytest.approx([900.0, 900.0, 1000.0])
     assert {d.OverallHeight for d in f.by_type("IfcDoor")} == {2100.0}
     assert sorted(w.OverallWidth for w in f.by_type("IfcWindow")) == pytest.approx([1000.0] + [1200.0] * 4 + [1500.0] * 6)
+
+
+def test_viewer_holds_the_ifc_file_for_a_person_to_save(built):
+    page = built.files["viewer"].read_text(encoding="utf-8")
+    packed = re.search(r'<script id="ifc" type="application/gzip">([A-Za-z0-9+/=]+)</script>', page)
+    assert packed and gzip.decompress(base64.b64decode(packed[1])) == built.files["ifc"].read_bytes()
+
+
+def test_export_writes_the_ifc_file_of_a_build_and_nothing_else(built, example, write, tmp_path):
+    target = tmp_path / "handover" / "building.ifc"
+    assert main(["export", str(write(example)), "-o", str(target), "-q"]) == 0
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["handover", "project.json"]       # no `out` of the project
+    assert [p.name for p in target.parent.iterdir()] == ["building.ifc"]
+    exported, of_build = ifcopenshell.open(str(target)), ifcopenshell.open(str(built.files["ifc"]))
+    assert Counter(e.is_a() for e in exported.by_type("IfcProduct")) == Counter(e.is_a() for e in of_build.by_type("IfcProduct"))
+    assert {e.GlobalId for e in exported.by_type("IfcRoot")} == {e.GlobalId for e in of_build.by_type("IfcRoot")}
+
+
+def test_export_of_a_model_that_fails_a_check_says_so_and_exits_with_1(example, write, tmp_path, capsys):
+    example["stair"][0]["box"] = [8000, 1000, 11000, 3000]      # no riser is drawn there
+    assert main(["export", str(write(example)), "-o", str(tmp_path / "building.ifc"), "-q"]) == 1
+    assert "failed: stair A from 1 is not in the model" in capsys.readouterr().out
 
 
 def test_stair_that_is_not_drawn_fails_the_build_and_leaves_the_model(example, write, tmp_path):

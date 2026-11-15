@@ -67,6 +67,8 @@
     <button data-view="nw">NW</button><button data-view="top">Top</button>
   </div>
   <label style="margin-top:4px"><input type="checkbox" id="ortho"><span class="grow">Parallel projection</span></label>
+  <h2>Export</h2>
+  <div class="row"><button id="save" title="Save the model as an IFC4 file, for other BIM tools">Save as IFC</button></div>
   <details>
     <summary>What is assumed</summary>
     <ul id="assumed"></ul>
@@ -80,6 +82,7 @@
 <div id="fail"></div>
 <script>__THREE__</script>
 <script id="model" type="application/json">__DATA__</script>
+<script id="ifc" type="application/gzip">__IFC__</script>
 <script>
 "use strict";
 (function () {
@@ -514,6 +517,23 @@
   for (const b of document.querySelectorAll("button[data-view]")) b.addEventListener("click", () => setView(b.dataset.view));
   $("fold").addEventListener("click", () => $("panel").classList.toggle("closed"));
 
+  // ---------------------------------------------------------------- export
+  async function ifcFile() {      // the IFC file of the model lies in this page, packed with gzip
+    const packed = new Blob([bytes($("ifc").textContent)]).stream();
+    return new Response(packed.pipeThrough(new DecompressionStream("gzip"))).blob();
+  }
+  if (typeof DecompressionStream === "undefined") {
+    $("save").disabled = true;
+    $("save").title = "This browser cannot unpack the IFC file that lies in this page.";
+  }
+  $("save").addEventListener("click", async () => {
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(await ifcFile());
+    link.download = D.ifc;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(link.href), 60000);
+  });
+
   $("title").textContent = D.name;
   document.title = D.name + " - 3D model";
   $("stats").textContent = D.counts + " \u00b7 " + Math.round(triangles).toLocaleString("en") + " triangles";
@@ -577,7 +597,7 @@
 
   // for scripted checks of this page
   window.viewer = {
-    setView, setLevels, setSection, setCategory, plan,
+    setView, setLevels, setSection, setCategory, plan, ifcFile,
     look(target, az, el, dist, parallel) {
       view.target.set(target[0], target[1], target[2]);
       view.az = az; view.el = Math.min(TOP, el); view.dist = dist; view.ortho = !!parallel;
