@@ -1,0 +1,596 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #eef1f4; color: #1d2228;
+               font: 13px/1.35 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  #view { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; cursor: grab; }
+  #labels { position: fixed; inset: 0; pointer-events: none; overflow: hidden; }
+  .lab { position: absolute; transform: translate(-50%, -50%); white-space: nowrap; text-align: center; font-size: 11px;
+         line-height: 1.15; color: #7a1020; text-shadow: 0 0 3px #fff, 0 0 3px #fff, 0 0 2px #fff; }
+  .lab b { display: block; font-weight: 600; }
+  .lab span { color: #333; font-size: 10px; }
+  #panel { position: fixed; top: 10px; left: 10px; width: 250px; max-height: calc(100% - 20px); overflow: auto;
+           background: rgba(255, 255, 255, 0.94); border: 1px solid #c9ced6; border-radius: 8px;
+           box-shadow: 0 2px 10px rgba(0, 0, 0, 0.12); padding: 10px 12px 12px; box-sizing: border-box; }
+  #panel.closed > *:not(header) { display: none; }
+  #panel.closed { width: auto; }
+  header { display: flex; align-items: center; gap: 8px; }
+  header h1 { font-size: 14px; margin: 0; flex: 1; }
+  h2 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: #5b6570; margin: 12px 0 4px; }
+  label { display: flex; align-items: center; gap: 6px; padding: 1px 0; }
+  label .grow { flex: 1; }
+  button { font: inherit; padding: 2px 8px; border: 1px solid #b9c0ca; border-radius: 5px; background: #f6f7f9; cursor: pointer; }
+  button:hover { background: #e9edf2; }
+  .row { display: flex; flex-wrap: wrap; gap: 4px; }
+  select, input[type=range] { width: 100%; box-sizing: border-box; }
+  .swatch { width: 10px; height: 10px; border-radius: 2px; border: 1px solid rgba(0, 0, 0, 0.25); flex: none; }
+  small, .muted { color: #5b6570; }
+  details { margin-top: 8px; }
+  details ul { margin: 4px 0 0; padding-left: 16px; }
+  #readout { font-variant-numeric: tabular-nums; }
+  #hint { position: fixed; right: 10px; bottom: 8px; color: #5b6570; font-size: 11px; background: rgba(255, 255, 255, 0.7);
+          padding: 2px 6px; border-radius: 4px; }
+  #fail { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; padding: 30px; text-align: center; }
+</style>
+</head>
+<body>
+<canvas id="view"></canvas>
+<div id="labels"></div>
+<aside id="panel">
+  <header><h1 id="title"></h1><button id="fold" title="Hide or show this panel">&#9776;</button></header>
+  <small id="stats"></small>
+  <h2>Storeys</h2>
+  <div id="storeys"></div>
+  <div class="row" style="margin-top:4px"><button id="all">Whole building</button></div>
+  <h2>Show</h2>
+  <div id="categories"></div>
+  <label><input type="checkbox" id="edges" checked><span class="grow">Edges</span></label>
+  <label><input type="checkbox" id="shadows" checked><span class="grow">Shadows</span></label>
+  <label><input type="checkbox" id="rooms"><span class="grow">Room numbers and names</span></label>
+  <label><input type="checkbox" id="source"><span class="grow">Source drawing (red lines)</span></label>
+  <h2>Section</h2>
+  <select id="axis">
+    <option value="none">No section</option>
+    <option value="z">Horizontal (plan cut)</option>
+    <option value="x">Vertical, looking west to east</option>
+    <option value="y">Vertical, looking south to north</option>
+  </select>
+  <input type="range" id="cut" min="0" max="1000" value="500" disabled>
+  <label><input type="checkbox" id="flip" disabled><span class="grow">Keep the other side</span><span id="readout" class="muted"></span></label>
+  <h2>View</h2>
+  <div class="row">
+    <button data-view="sw">SW</button><button data-view="se">SE</button><button data-view="ne">NE</button>
+    <button data-view="nw">NW</button><button data-view="top">Top</button>
+  </div>
+  <label style="margin-top:4px"><input type="checkbox" id="ortho"><span class="grow">Parallel projection</span></label>
+  <details>
+    <summary>What is assumed</summary>
+    <ul id="assumed"></ul>
+  </details>
+  <details>
+    <summary>Notes from the drawings (<span id="notecount"></span>)</summary>
+    <ul id="notes"></ul>
+  </details>
+</aside>
+<div id="hint">Drag: turn &middot; Right drag or Shift+drag: move &middot; Wheel: zoom &middot; Double-click: turn about that point</div>
+<div id="fail"></div>
+<script>__THREE__</script>
+<script id="model" type="application/json">__DATA__</script>
+<script>
+"use strict";
+(function () {
+  const D = JSON.parse(document.getElementById("model").textContent);
+  const $ = (id) => document.getElementById(id);
+  const canvas = $("view");
+  let renderer;
+  try {
+    renderer = new THREE.WebGLRenderer({ canvas, antialias: true, stencil: true });
+  } catch (err) {
+    $("fail").style.display = "flex";
+    $("fail").textContent = "This browser cannot show 3D graphics (WebGL is not available).";
+    return;
+  }
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.localClippingEnabled = true;
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0xeef1f4);
+
+  // ---------------------------------------------------------------- data
+  function bytes(b64) {
+    const s = atob(b64), out = new Uint8Array(s.length);
+    for (let i = 0; i < s.length; i++) out[i] = s.charCodeAt(i);
+    return out.buffer;
+  }
+  const COLOUR = {
+    "walls/wall": 0xece9e2, "floors/plate": 0xcfcbc2, "roofs/roof": 0x7f878e, "doors/frame": 0x8a6e4f, "doors/leaf": 0xb98d5e,
+    "windows/frame": 0xfbfbfb, "windows/glass": 0x8fc3e8, "stairs/stair": 0xdcd6c8, "stairs/rail": 0x47505a,
+    "columns/column": 0xece9e2, "balconies/balcony": 0xcfcbc2, "balconies/rail": 0x47505a,
+  };
+  const CATEGORIES = [["walls", "Walls"], ["floors", "Floor plates"], ["roofs", "Roof plates"], ["doors", "Doors"],
+                      ["windows", "Windows"], ["stairs", "Stairs"], ["columns", "Columns"], ["balconies", "Balconies"]];
+  // cut faces are filled: 0 with the dark of a wall in a plan, 1 with the grey of joinery
+  const CAPPED = { walls: 0, floors: 0, roofs: 0, stairs: 0, columns: 0, balconies: 0, doors: 1, windows: 1 };
+
+  const FAR = 1e6;
+  const plane = new THREE.Plane(new THREE.Vector3(0, 0, -1), FAR);     // keeps the side its normal points to
+  const planes = [plane];
+  const stencil = (side, op) => new THREE.MeshBasicMaterial({
+    side, clippingPlanes: planes, depthWrite: false, depthTest: false, colorWrite: false, stencilWrite: true,
+    stencilFunc: THREE.AlwaysStencilFunc, stencilFail: op, stencilZFail: op, stencilZPass: op });
+  const backs = stencil(THREE.BackSide, THREE.IncrementWrapStencilOp);
+  const fronts = stencil(THREE.FrontSide, THREE.DecrementWrapStencilOp);
+  const edgeMaterial = new THREE.LineBasicMaterial({ color: 0x2c3138, clippingPlanes: planes });
+  const sourceMaterial = new THREE.LineBasicMaterial({ color: 0xe0102a, depthTest: false, transparent: true });
+
+  const levels = {};          // key -> { spec, group, source, meshes: [] }
+  const bounds = new THREE.Box3();
+  for (const spec of D.levels) {
+    const group = new THREE.Group();
+    scene.add(group);
+    levels[spec.key] = { spec, group, meshes: [], source: null, box: new THREE.Box3() };
+  }
+  let triangles = 0;
+  function edgeGeometry(b64) {
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(bytes(b64)), 3));
+    return geometry;
+  }
+  for (const s of D.solids) {
+    const lv = levels[s.level];
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(bytes(s.v)), 3));
+    geometry.setIndex(new THREE.BufferAttribute(new Uint32Array(bytes(s.i)), 1));
+    geometry.computeVertexNormals();      // shading is flat; the shadow test moves along these to avoid speckle
+    geometry.computeBoundingBox();
+    geometry.computeBoundingSphere();
+    triangles += geometry.index.count / 3;
+    const glass = s.material === "glass";
+    const material = new THREE.MeshStandardMaterial({
+      color: COLOUR[s.category + "/" + s.material] || 0xcccccc, roughness: glass ? 0.15 : 0.92, metalness: 0.0, flatShading: true,
+      clippingPlanes: planes, clipShadows: true, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1,
+      transparent: glass, opacity: glass ? 0.4 : 1.0, depthWrite: !glass });
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.castShadow = !glass;
+    mesh.receiveShadow = !glass;
+    mesh.renderOrder = glass ? 5 : 3;
+    const holder = new THREE.Group();
+    holder.userData.category = s.category;
+    holder.add(mesh);
+    const lines = new THREE.LineSegments(edgeGeometry(s.e), edgeMaterial);
+    lines.renderOrder = 4;
+    lines.userData.edges = "own";
+    lines.userData.of = s.category;
+    holder.add(lines);
+    if (s.category in CAPPED) {
+      for (const m of [backs, fronts]) {
+        const helper = new THREE.Mesh(geometry, m);
+        helper.renderOrder = 1 + 0.2 * CAPPED[s.category];
+        helper.userData.cap = true;
+        helper.visible = false;
+        holder.add(helper);
+      }
+    }
+    lv.group.add(holder);
+    lv.meshes.push(holder);
+    lv.box.union(geometry.boundingBox);
+    bounds.union(geometry.boundingBox);
+  }
+  // edges of a kind of solid over all storeys: no line where two storeys meet flush
+  const wholes = {};
+  for (const s of D.whole) {
+    const lines = new THREE.LineSegments(edgeGeometry(s.e), edgeMaterial);
+    lines.renderOrder = 4;
+    lines.userData.edges = "whole";
+    lines.userData.of = s.category;
+    lines.visible = false;
+    scene.add(lines);
+    wholes[s.category] = lines;
+  }
+  for (const s of D.lines) {
+    const flat = new Float32Array(bytes(s.p)), n = flat.length / 4, pos = new Float32Array(n * 6);
+    for (let i = 0; i < n; i++) {
+      pos[6 * i] = flat[4 * i]; pos[6 * i + 1] = flat[4 * i + 1];
+      pos[6 * i + 3] = flat[4 * i + 2]; pos[6 * i + 4] = flat[4 * i + 3];
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+    const lines = new THREE.LineSegments(geometry, sourceMaterial);
+    lines.renderOrder = 9;
+    lines.visible = false;
+    lines.frustumCulled = false;
+    levels[s.level].group.add(lines);
+    levels[s.level].source = lines;
+  }
+  const centre = bounds.getCenter(new THREE.Vector3());
+  const size = bounds.getSize(new THREE.Vector3());
+  const radius = 0.5 * size.length();
+
+  // the filled cut faces: first of the building itself, then of its doors and windows
+  const caps = [0x23272d, 0x76828f].map((color, i) => {
+    const cap = new THREE.Mesh(new THREE.PlaneGeometry(8 * radius, 8 * radius), new THREE.MeshBasicMaterial({
+      color, side: THREE.DoubleSide, stencilWrite: true, stencilRef: 0, stencilFunc: THREE.NotEqualStencilFunc,
+      stencilFail: THREE.ReplaceStencilOp, stencilZFail: THREE.ReplaceStencilOp, stencilZPass: THREE.ReplaceStencilOp }));
+    cap.renderOrder = 1.1 + 0.2 * i;
+    cap.visible = false;
+    cap.onAfterRender = (r) => r.clearStencil();
+    scene.add(cap);
+    return cap;
+  });
+
+  // ---------------------------------------------------------------- light
+  scene.add(new THREE.HemisphereLight(0xffffff, 0x9aa3ad, 0.78));
+  const sun = new THREE.DirectionalLight(0xffffff, 0.62);
+  sun.position.copy(centre).add(new THREE.Vector3(-0.55, -0.75, 1.1).normalize().multiplyScalar(2 * radius));
+  sun.target.position.copy(centre);
+  sun.castShadow = true;
+  sun.shadow.mapSize.set(4096, 4096);
+  sun.shadow.bias = -0.0005;
+  sun.shadow.normalBias = 0.04;
+  const sc = sun.shadow.camera;
+  sc.left = -radius; sc.right = radius; sc.top = radius; sc.bottom = -radius; sc.near = 0.5; sc.far = 4 * radius;
+  sc.updateProjectionMatrix();
+  scene.add(sun, sun.target);
+  const fill = new THREE.DirectionalLight(0xffffff, 0.22);
+  fill.position.set(0.8, 0.5, 0.4);
+  scene.add(fill);
+
+  // ---------------------------------------------------------------- camera
+  const FOV = 40;
+  const persp = new THREE.PerspectiveCamera(FOV, 1, 0.1, 5000);
+  const ortho = new THREE.OrthographicCamera(-1, 1, 1, -1, -5000, 5000);
+  const view = { target: centre.clone(), az: -2.2, el: 0.62, dist: 2.4 * radius, ortho: false };
+  let camera = persp;
+  let dirty = true;
+  const need = () => { dirty = true; };
+
+  function place() {
+    const w = canvas.clientWidth, h = canvas.clientHeight;
+    const ce = Math.cos(view.el);
+    const dir = new THREE.Vector3(ce * Math.cos(view.az), ce * Math.sin(view.az), Math.sin(view.el));
+    camera = view.ortho ? ortho : persp;
+    camera.up.set(0, 0, 1);
+    camera.position.copy(view.target).addScaledVector(dir, view.dist);
+    camera.lookAt(view.target);
+    if (view.ortho) {
+      const half = view.dist * Math.tan(THREE.MathUtils.degToRad(FOV / 2));
+      ortho.left = -half * w / h; ortho.right = half * w / h; ortho.top = half; ortho.bottom = -half;
+      ortho.near = -10 * radius; ortho.far = 10 * radius;
+    } else {
+      persp.aspect = w / h;
+      persp.near = Math.max(0.05, view.dist / 200);
+      persp.far = view.dist + 6 * radius;
+    }
+    camera.updateProjectionMatrix();
+    camera.updateMatrixWorld();
+  }
+  function resize() {
+    renderer.setSize(window.innerWidth, window.innerHeight, false);
+    need();
+  }
+  window.addEventListener("resize", resize);
+
+  function fit(box, az, el) {       // the nearest distance from which the whole box is in the window
+    const c = box.getCenter(new THREE.Vector3());
+    const ce = Math.cos(el);
+    const dir = new THREE.Vector3(ce * Math.cos(az), ce * Math.sin(az), Math.sin(el));
+    const right = new THREE.Vector3(-Math.sin(az), Math.cos(az), 0);
+    const up = new THREE.Vector3().crossVectors(dir, right);
+    const t = Math.tan(THREE.MathUtils.degToRad(FOV / 2)), aspect = canvas.clientWidth / canvas.clientHeight;
+    let dist = 0;
+    for (let i = 0; i < 8; i++) {
+      const p = new THREE.Vector3(i & 1 ? box.max.x : box.min.x, i & 2 ? box.max.y : box.min.y, i & 4 ? box.max.z : box.min.z).sub(c);
+      const towards = view.ortho ? 0 : p.dot(dir);
+      dist = Math.max(dist, Math.abs(p.dot(right)) / (t * aspect) + towards, Math.abs(p.dot(up)) / t + towards);
+    }
+    view.target.copy(c);
+    view.az = az; view.el = el;
+    view.dist = 1.06 * dist;
+    need();
+  }
+  function shown() {
+    const box = new THREE.Box3();
+    for (const key in levels) if (levels[key].group.visible) box.union(levels[key].box);
+    return box.isEmpty() ? bounds : box;
+  }
+  const TOP = Math.PI / 2 - 1e-4;
+  const VIEWS = { sw: [-2.2, 0.62], se: [-0.95, 0.62], ne: [0.95, 0.62], nw: [2.2, 0.62], top: [-Math.PI / 2, TOP] };
+  function setView(name) {
+    const v = VIEWS[name];
+    fit(shown(), v[0], v[1]);
+  }
+
+  // ---------------------------------------------------------------- pointer
+  const pointers = new Map();
+  let pinch = 0;
+  function screenToWorld(dx, dy) {       // movement of the target for a pointer movement in pixels
+    const perPixel = 2 * view.dist * Math.tan(THREE.MathUtils.degToRad(FOV / 2)) / canvas.clientHeight;
+    const right = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0);
+    const up = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 1);
+    return right.multiplyScalar(-dx * perPixel).addScaledVector(up, dy * perPixel);
+  }
+  function zoom(factor, x, y) {
+    const w = canvas.clientWidth, h = canvas.clientHeight;
+    const before = screenToWorld(x - w / 2, y - h / 2);
+    view.dist = Math.min(20 * radius, Math.max(0.5, view.dist * factor));
+    place();
+    const after = screenToWorld(x - w / 2, y - h / 2);
+    view.target.add(after.sub(before));
+    need();
+  }
+  canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+  canvas.addEventListener("pointerdown", (e) => {
+    canvas.setPointerCapture(e.pointerId);
+    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY, pan: e.button !== 0 || e.shiftKey });
+    pinch = 0;
+  });
+  canvas.addEventListener("pointerup", (e) => { pointers.delete(e.pointerId); pinch = 0; });
+  canvas.addEventListener("pointercancel", (e) => { pointers.delete(e.pointerId); pinch = 0; });
+  canvas.addEventListener("pointermove", (e) => {
+    const p = pointers.get(e.pointerId);
+    if (!p) return;
+    const dx = e.clientX - p.x, dy = e.clientY - p.y;
+    p.x = e.clientX; p.y = e.clientY;
+    if (pointers.size === 2) {
+      const [a, b] = [...pointers.values()];
+      const gap = Math.hypot(a.x - b.x, a.y - b.y);
+      if (pinch > 0 && gap > 0) zoom(pinch / gap, (a.x + b.x) / 2, (a.y + b.y) / 2);
+      pinch = gap;
+      view.target.add(screenToWorld(dx / 2, dy / 2));
+    } else if (p.pan) {
+      view.target.add(screenToWorld(dx, dy));
+    } else {
+      view.az -= dx * 0.006;
+      view.el = Math.min(TOP, Math.max(-1.45, view.el + dy * 0.006));
+    }
+    need();
+  });
+  canvas.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    zoom(Math.exp(Math.sign(e.deltaY) * Math.min(Math.abs(e.deltaY), 120) * 0.0016), e.clientX, e.clientY);
+  }, { passive: false });
+  const ray = new THREE.Raycaster();
+  canvas.addEventListener("dblclick", (e) => {
+    const p = new THREE.Vector2(2 * e.clientX / canvas.clientWidth - 1, 1 - 2 * e.clientY / canvas.clientHeight);
+    ray.setFromCamera(p, camera);
+    const targets = [];
+    for (const key in levels) {
+      if (!levels[key].group.visible) continue;
+      for (const holder of levels[key].meshes) if (holder.visible) targets.push(holder.children[0]);
+    }
+    const hit = ray.intersectObjects(targets, false).find((h) => plane.distanceToPoint(h.point) >= 0);
+    if (!hit) return;
+    const eye = camera.position.clone();
+    view.target.copy(hit.point);
+    if (!view.ortho) view.dist = Math.max(0.5, eye.distanceTo(hit.point));
+    need();
+  });
+
+  // ---------------------------------------------------------------- panel
+  const section = { axis: "none", at: 0, flip: false };
+  function applySection() {
+    const on = section.axis !== "none";
+    $("cut").disabled = !on;
+    $("flip").disabled = !on || section.axis === "z";
+    if (!on) {
+      plane.normal.set(0, 0, -1); plane.constant = FAR;
+      $("readout").textContent = "";
+    } else {
+      const sign = section.axis === "z" || !section.flip ? -1 : 1;
+      plane.normal.set(section.axis === "x" ? sign : 0, section.axis === "y" ? sign : 0, section.axis === "z" ? sign : 0);
+      plane.constant = -sign * section.at;
+      const world = section.at + (section.axis === "z" ? 0 : D.origin[section.axis === "x" ? 0 : 1] / 1000);
+      $("readout").textContent = (section.axis === "z" ? "z " : section.axis + " ") + world.toFixed(2) + " m";
+    }
+    for (const cap of caps) {
+      cap.visible = on;
+      if (on) {
+        cap.position.copy(plane.normal).multiplyScalar(-plane.constant);
+        cap.lookAt(cap.position.clone().sub(plane.normal));
+      }
+    }
+    scene.traverse((o) => { if (o.userData.cap) o.visible = on; });
+    placeSource();
+    need();
+  }
+  function range(axis) {
+    return axis === "z" ? [bounds.min.z - 0.05, bounds.max.z + 0.05] : axis === "x" ? [bounds.min.x - 0.1, bounds.max.x + 0.1]
+      : [bounds.min.y - 0.1, bounds.max.y + 0.1];
+  }
+  function setSection(axis, at, flip) {
+    section.axis = axis;
+    section.flip = !!flip;
+    if (axis !== "none") {
+      const [lo, hi] = range(axis);
+      section.at = at === undefined || at === null ? (lo + hi) / 2 : Math.min(hi, Math.max(lo, at));
+      $("cut").value = Math.round(1000 * (section.at - lo) / (hi - lo));
+    }
+    $("axis").value = axis;
+    $("flip").checked = section.flip;
+    applySection();
+  }
+  $("axis").addEventListener("change", (e) => setSection(e.target.value));
+  $("cut").addEventListener("input", (e) => {
+    const [lo, hi] = range(section.axis);
+    section.at = lo + (hi - lo) * e.target.value / 1000;
+    applySection();
+  });
+  $("flip").addEventListener("change", (e) => { section.flip = e.target.checked; applySection(); });
+
+  function placeSource() {      // the drawing lies on the cut when the cut passes through its storey, else on the floor
+    for (const key in levels) {
+      const lv = levels[key];
+      if (!lv.source) continue;
+      const floor = lv.spec.elevation / 1000, top = lv.spec.top / 1000;
+      const onCut = section.axis === "z" && section.at > floor && section.at < top;
+      lv.source.position.z = (onCut ? section.at : floor) + 0.01;
+    }
+  }
+
+  const boxes = {};
+  const catBoxes = {};
+  function syncEdges() {      // with every storey shown, the edges of the walls as one solid; else those of each storey
+    const on = $("edges").checked;
+    const all = Object.keys(levels).every((key) => levels[key].group.visible);
+    scene.traverse((o) => {
+      if (o.userData.edges === "own") o.visible = on && !(all && wholes[o.userData.of]);
+      else if (o.userData.edges === "whole") o.visible = on && all && catBoxes[o.userData.of].checked;
+    });
+    need();
+  }
+  function setLevels(keys) {
+    for (const key in levels) {
+      levels[key].group.visible = keys.indexOf(key) >= 0;
+      boxes[key].checked = levels[key].group.visible;
+    }
+    syncEdges();
+  }
+  function setShadows(on) {
+    sun.castShadow = on;
+    $("shadows").checked = on;
+    need();
+  }
+  function plan(key) {
+    setLevels([key]);
+    setSection("z", levels[key].spec.elevation / 1000 + D.plan_cut / 1000);
+    setShadows(false);        // the shadows of cut walls hide the plan
+    view.ortho = true;
+    $("ortho").checked = true;
+    $("rooms").checked = true;
+    fit(levels[key].box, VIEWS.top[0], VIEWS.top[1]);
+  }
+  for (const spec of D.levels.slice().reverse()) {
+    const row = document.createElement("label");
+    const box = document.createElement("input");
+    box.type = "checkbox"; box.checked = true;
+    box.addEventListener("change", () => { levels[spec.key].group.visible = box.checked; syncEdges(); });
+    boxes[spec.key] = box;
+    const name = document.createElement("span");
+    name.className = "grow";
+    name.textContent = spec.name + "  (" + (spec.elevation / 1000).toFixed(2) + " m)";
+    const btn = document.createElement("button");
+    btn.textContent = "Plan";
+    btn.title = "Cut this storey " + (D.plan_cut / 1000).toFixed(1) + " m above its floor and look straight down";
+    btn.addEventListener("click", (e) => { e.preventDefault(); plan(spec.key); });
+    row.append(box, name, btn);
+    $("storeys").append(row);
+  }
+  $("all").addEventListener("click", () => {
+    setLevels(Object.keys(levels));
+    setSection("none");
+    setShadows(true);
+    view.ortho = false; $("ortho").checked = false;
+    setView("sw");
+  });
+  function setCategory(cat, on) {
+    scene.traverse((o) => { if (o.userData.category === cat) o.visible = on; });
+    catBoxes[cat].checked = on;
+    syncEdges();
+  }
+  for (const [cat, text] of CATEGORIES) {
+    const row = document.createElement("label");
+    const box = document.createElement("input");
+    box.type = "checkbox"; box.checked = true;
+    box.addEventListener("change", () => setCategory(cat, box.checked));
+    catBoxes[cat] = box;
+    const name = document.createElement("span");
+    name.className = "grow"; name.textContent = text;
+    row.append(box, name);
+    $("categories").append(row);
+  }
+  $("edges").addEventListener("change", syncEdges);
+  $("shadows").addEventListener("change", (e) => { sun.castShadow = e.target.checked; need(); });
+  $("source").addEventListener("change", (e) => {
+    for (const key in levels) if (levels[key].source) levels[key].source.visible = e.target.checked;
+    need();
+  });
+  $("rooms").addEventListener("change", need);
+  $("ortho").addEventListener("change", (e) => { view.ortho = e.target.checked; need(); });
+  for (const b of document.querySelectorAll("button[data-view]")) b.addEventListener("click", () => setView(b.dataset.view));
+  $("fold").addEventListener("click", () => $("panel").classList.toggle("closed"));
+
+  $("title").textContent = D.name;
+  document.title = D.name + " - 3D model";
+  $("stats").textContent = D.counts + " \u00b7 " + Math.round(triangles).toLocaleString("en") + " triangles";
+  for (const line of D.assumed) { const li = document.createElement("li"); li.textContent = line; $("assumed").append(li); }
+  for (const line of D.notes) { const li = document.createElement("li"); li.textContent = line; $("notes").append(li); }
+  $("notecount").textContent = D.notes.length;
+
+  // ---------------------------------------------------------------- room labels
+  const labels = D.rooms.map((r) => {
+    const el = document.createElement("div");
+    el.className = "lab";
+    const b = document.createElement("b");
+    b.textContent = r.number;
+    const s = document.createElement("span");
+    s.textContent = r.name;
+    el.append(b, s);
+    el.style.display = "none";
+    $("labels").append(el);
+    return { el, level: r.level, at: new THREE.Vector3(r.x, r.y, levels[r.level].spec.elevation / 1000 + 0.02), shownAs: "" };
+  });
+  function placeLabels() {
+    const on = $("rooms").checked;
+    let top = null;       // the highest storey whose floor is in view
+    if (on) {
+      for (const spec of D.levels) {
+        if (!levels[spec.key].group.visible) continue;
+        if (section.axis === "z" && section.at <= spec.elevation / 1000) continue;
+        top = spec.key;
+      }
+    }
+    const w = canvas.clientWidth, h = canvas.clientHeight, v = new THREE.Vector3();
+    for (const l of labels) {
+      let css = "none";
+      if (l.level === top && plane.distanceToPoint(l.at) >= 0) {
+        v.copy(l.at).project(camera);
+        if (v.z > -1 && v.z < 1 && Math.abs(v.x) < 1.05 && Math.abs(v.y) < 1.05) {
+          css = "translate(-50%, -50%) translate(" + ((v.x + 1) * w / 2).toFixed(1) + "px," + ((1 - v.y) * h / 2).toFixed(1) + "px)";
+        }
+      }
+      if (css === l.shownAs) continue;
+      l.shownAs = css;
+      if (css === "none") l.el.style.display = "none";
+      else { l.el.style.display = ""; l.el.style.left = "0"; l.el.style.top = "0"; l.el.style.transform = css; }
+    }
+  }
+
+  // ---------------------------------------------------------------- loop
+  function frame() {
+    requestAnimationFrame(frame);
+    if (!dirty) return;
+    dirty = false;
+    place();
+    renderer.render(scene, camera);
+    placeLabels();
+  }
+  resize();
+  applySection();
+  syncEdges();
+  setView("sw");
+  frame();
+
+  // for scripted checks of this page
+  window.viewer = {
+    setView, setLevels, setSection, setCategory, plan,
+    look(target, az, el, dist, parallel) {
+      view.target.set(target[0], target[1], target[2]);
+      view.az = az; view.el = Math.min(TOP, el); view.dist = dist; view.ortho = !!parallel;
+      $("ortho").checked = view.ortho;
+      need();
+    },
+    toggle(id, on) { const el = $(id); el.checked = on; el.dispatchEvent(new Event("change")); },
+    origin: D.origin,
+    ready: true,
+    scene, renderer, sun,
+    render() { dirty = false; place(); renderer.render(scene, camera); placeLabels(); },
+  };
+})();
+</script>
+</body>
+</html>

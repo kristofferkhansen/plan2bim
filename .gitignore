@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.pyc
+.ruff_cache/
+.DS_Store
+._*
+
+# Project data
+dwg/
+out/
+build/
+*.dwg
+*.dxf
+*.ifc
+
+# Downloaded separately, see plan2bim/vendor/README.md
+plan2bim/vendor/three.min.js

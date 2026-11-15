@@ -1,0 +1,16 @@
+[project]
+name = "plan2bim"
+version = "0.1.0"
+description = "DWG floor plans -> 3D building model (IFC file and web viewer)"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "ezdxf>=1.4",       # read DXF geometry, layers, block attributes
+    "shapely>=2.0",     # all plan geometry: the cells that the drawn lines enclose, outlines, cuts
+    "ifcopenshell>=0.8", # write the IFC file, read it back with another geometry kernel, validate it
+    "matplotlib>=3.11.2",   # review plots
+    "scipy>=1.18.1",        # nearest-point search between line end points
+    "manifold3d>=3.5.5",    # join prisms into closed solids, find solids that overlap
+]
+
+[tool.uv]
+package = false
