@@ -1,7 +1,8 @@
-"""The reader of the drawings: units, entities it does not take, and arcs that are drawn mirrored."""
+"""The reader of the drawings: units, entities it does not take, arcs that are drawn mirrored, and DWG conversion."""
 from __future__ import annotations
 
 import math
+import os
 from pathlib import Path
 
 import ezdxf
@@ -61,3 +62,21 @@ def test_arc_is_the_arc_that_is_drawn(tmp_path, mirrored):
     middle = (arc.cx + arc.r * math.cos(half), arc.cy + arc.r * math.sin(half))
     assert arc.r == pytest.approx(300.0)
     assert min(math.dist(middle, p) for p in drawn) < 5.0       # the same side of the chord as the drawn arc
+
+
+def test_storey_that_is_given_another_dwg_is_converted_again(tmp_path, monkeypatch):
+    """`dwg2dxf` here is a program that copies the DWG and counts its runs: the test needs no LibreDWG."""
+    tool = tmp_path / "bin" / "dwg2dxf"
+    tool.parent.mkdir()
+    tool.write_text(f'#!/bin/sh\ncp "$4" "$3"\necho run >> "{tmp_path}/runs"\n', encoding="utf-8")
+    tool.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tool.parent), prepend=os.pathsep)
+    new, old, cache = tmp_path / "new.dwg", tmp_path / "old.dwg", tmp_path / "dxf" / "1.dxf"
+    new.write_text("new revision", encoding="utf-8")
+    old.write_text("old revision", encoding="utf-8")
+    os.utime(old, (0, 0))               # older than any conversion
+
+    assert source.to_dxf(new, cache).read_text(encoding="utf-8") == "new revision"
+    assert source.to_dxf(new, cache).read_text(encoding="utf-8") == "new revision"
+    assert (tmp_path / "runs").read_text(encoding="utf-8").count("run") == 1      # the same drawing: converted once
+    assert source.to_dxf(old, cache).read_text(encoding="utf-8") == "old revision"

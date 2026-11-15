@@ -27,7 +27,7 @@ from pathlib import Path
 
 import numpy as np
 import shapely
-from shapely.geometry import LinearRing, Point, Polygon
+from shapely.geometry import Point, Polygon
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import polygonize, unary_union
 
@@ -226,13 +226,7 @@ def _findings(level: str, points: np.ndarray, weight: np.ndarray, dist: np.ndarr
 
 def cut_area(solids: list[Solid], key: str, z: float, categories: tuple[str, ...] = STRUCTURE) -> BaseGeometry:
     """Plan of what is solid where the horizontal plane at `z` cuts the storey's solids of the given categories."""
-    outer, holes = [], []
-    for s in solids:
-        if s.level == key and s.category in categories:
-            for ring in section(s.body, z):
-                if len(ring) >= 3:
-                    (outer if LinearRing(ring).is_ccw else holes).append(Polygon(ring))
-    return unary_union(outer).difference(unary_union(holes))
+    return unary_union([part for s in solids if s.level == key and s.category in categories for part in section(s.body, z)])
 
 
 def _patches(name: str, plan: BaseGeometry, severity: str) -> list[Note]:

@@ -20,7 +20,8 @@ uv run plan2bim build PROJECT.toml
 ```
 
 A storey drawing is a DWG or a DXF. A DXF is read as it is. For a DWG, `dwg2dxf` of LibreDWG (0.14 was used)
-must be on the `PATH`. It converts each DWG to `out/dxf/KEY.dxf` once. The Docker image of the repository holds it.
+must be on the `PATH`. It converts each DWG to `out/dxf/KEY.dxf`. It converts a storey again only when its DWG
+is another file or has changed. The Docker image of the repository holds it.
 When `dwg2dxf` cannot convert a drawing, convert it to DXF with another tool and name the DXF in the project file.
 
 `plan2bim check PROJECT.toml` checks the project file only. `plan2bim inspect DRAWING` lists the layers,

@@ -9,6 +9,7 @@ from dataclasses import dataclass
 
 import manifold3d as m3
 import numpy as np
+from shapely.geometry import Polygon
 
 from .model import Element, Model, Piece
 
@@ -56,9 +57,15 @@ def triangles(body: m3.Manifold) -> tuple[np.ndarray, np.ndarray]:
     return np.asarray(mesh.vert_properties, dtype=np.float64)[:, :3], np.asarray(mesh.tri_verts, dtype=np.uint32)
 
 
-def section(body: m3.Manifold, z: float) -> list[np.ndarray]:
-    """Outlines of the solid cut by the horizontal plane at `z`."""
-    return [np.asarray(ring) for ring in body.slice(z).to_polygons()]
+def section(body: m3.Manifold, z: float) -> list[Polygon]:
+    """What is solid where the horizontal plane at `z` cuts the solid: one polygon, with its holes, for each
+    part of the cut that stands apart. A part that stands in a hole of another part is a polygon of its own."""
+    out = []
+    for part in body.slice(z).decompose():
+        rings = sorted((Polygon(ring) for ring in part.to_polygons() if len(ring) >= 3), key=lambda p: -p.area)
+        if rings:
+            out.append(Polygon(rings[0].exterior, [hole.exterior for hole in rings[1:]]))
+    return out
 
 
 def feature_edges(body: m3.Manifold, degrees: float = 25.0, fine: float = 12.0) -> np.ndarray:

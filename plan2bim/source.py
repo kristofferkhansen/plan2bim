@@ -14,6 +14,7 @@ polylines with bulges. What else lies on a layer that the reader uses is counted
 """
 from __future__ import annotations
 
+import hashlib
 import math
 import shutil
 import subprocess
@@ -79,10 +80,16 @@ class Drawing:
 
 
 def to_dxf(drawing: Path, cache: Path) -> Path:
-    """The drawing as DXF. A DXF is used as it is. A DWG is converted with LibreDWG's dwg2dxf, once, to `cache`."""
+    """The drawing as DXF. A DXF is used as it is. A DWG is converted with LibreDWG's dwg2dxf to `cache`.
+
+    The conversion is kept: `cache` is used again as long as the file beside it holds the hash of this DWG.
+    """
     if drawing.suffix.lower() == ".dxf":
         return drawing
-    if cache.exists() and cache.stat().st_mtime >= drawing.stat().st_mtime:
+    stamp = cache.with_suffix(".sha256")
+    with drawing.open("rb") as f:
+        digest = hashlib.file_digest(f, "sha256").hexdigest()
+    if cache.exists() and stamp.exists() and stamp.read_text(encoding="ascii") == digest:
         return cache
     exe = shutil.which("dwg2dxf")
     if not exe:
@@ -90,10 +97,13 @@ def to_dxf(drawing: Path, cache: Path) -> Path:
                          "(https://www.gnu.org/software/libredwg/), or convert the drawing to DXF with another "
                          "tool and name the DXF in the project file.")
     cache.parent.mkdir(parents=True, exist_ok=True)
+    stamp.unlink(missing_ok=True)
+    cache.unlink(missing_ok=True)       # what is left of another drawing is not the conversion of this one
     r = subprocess.run([exe, "-y", "-o", str(cache), str(drawing)], capture_output=True, text=True, check=False)
     if not cache.exists() or cache.stat().st_size == 0:
         raise InputError(f"dwg2dxf cannot convert {drawing.name}: {r.stderr.strip()[-400:] or 'no output'}. "
                          "Convert the drawing to DXF with another tool and name the DXF in the project file.")
+    stamp.write_text(digest, encoding="ascii")
     return cache
 
 
