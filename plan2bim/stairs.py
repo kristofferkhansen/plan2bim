@@ -17,6 +17,7 @@ from shapely.geometry.base import BaseGeometry
 from shapely.ops import unary_union
 
 from .level import Level
+from .model import Note
 from .project import Project, StairSpec
 
 RISER_MIN = 600.0           # a riser line is at least this long
@@ -27,6 +28,10 @@ SPIRAL_REACH = 1500.0       # no spiral stair is wider than twice this
 ARC_STEP = math.radians(3.0)
 
 Bounds = tuple[float, float, float, float]
+
+
+class StairError(Exception):
+    """The drawing does not show a stair as the project file says. `build` turns it into a note."""
 
 
 @dataclass
@@ -121,7 +126,7 @@ def _flights(spec: StairSpec, levels: dict[str, Level], key: str) -> tuple[list[
     own = riser_lines(levels[key], spec.box, travel) if spec.draw_level else shown
     want = 2 if spec.kind == "dogleg" else 1
     if len(shown) < want:
-        raise ValueError(f"stair {spec.name}, storey {key}: {len(shown)} flights found in the drawing, {want} needed")
+        raise StairError(f"{len(shown)} flights found in the drawing, {want} needed")
     shown = sorted(sorted(shown, key=lambda f: -len(f[1]))[:want])
     return shown, own
 
@@ -133,14 +138,20 @@ def _across_here(shown: Flight, own: list[Flight]) -> tuple[float, float]:
 
 
 def footprints(project: Project, levels: dict[str, Level]) -> dict[str, list[BaseGeometry]]:
-    """Per storey, the plan area of the flights that start on it. Faces inside are treads, not walls."""
+    """Per storey, the plan area of the flights that start on it. Faces inside are treads, not walls.
+
+    A stair that the drawing does not show has no area here. `build` reports it.
+    """
     out: dict[str, list[BaseGeometry]] = {lv.key: [] for lv in project.levels}
     for spec in project.stairs:
         if spec.kind == "spiral":
             continue
         travel = _travel(spec)
         for key in spec.levels:
-            shown, own = _flights(spec, levels, key)
+            try:
+                shown, own = _flights(spec, levels, key)
+            except StairError:
+                continue
             for f in shown:
                 out[key].append(_rect(travel, _across_here(f, own), f[1][0], f[1][-1]))
     return out
@@ -225,7 +236,7 @@ def _circles(level: Level, at: tuple[float, float]) -> tuple[tuple[float, float]
 def _spiral(spec: StairSpec, project: Project, key: str, levels: dict[str, Level]) -> Stair:
     found = _circles(levels[key], spec.at)
     if found is None or len(found[1]) < 3:
-        raise ValueError(f"stair {spec.name}, storey {key}: no post and two outer circles drawn near {spec.at}")
+        raise StairError(f"no post and two outer circles drawn near {spec.at}")
     centre, radii = found
     post, r_in, r_out = radii[0], radii[-2], radii[-1]
     radial = _spokes(levels[key], centre, post, r_in)
@@ -274,17 +285,23 @@ def _spokes(level: Level, centre: tuple[float, float], post: float, r_in: float)
     return sorted(out)
 
 
-def build(project: Project, levels: dict[str, Level], blocked: dict[str, BaseGeometry]) -> list[Stair]:
+def build(project: Project, levels: dict[str, Level], blocked: dict[str, BaseGeometry], notes: list[Note]) -> list[Stair]:
     """All stairs, storey by storey.
 
     `blocked` is, per storey, the plan of its wall mass and of its door and window openings. No tread or
-    landing enters it.
+    landing enters it. A stair that the drawing does not show as the project file says is left out, and a
+    note that fails the build goes to `notes`: the rest of the model is still there to look at.
     """
     make = {"dogleg": _dogleg, "straight": _straight, "spiral": _spiral}
     out: list[Stair] = []
     for spec in project.stairs:
         for key in spec.levels:
-            stair = make[spec.kind](spec, project, key, levels)
+            try:
+                stair = make[spec.kind](spec, project, key, levels)
+            except StairError as e:
+                c = area(spec).centroid
+                notes.append(Note(f"stair {spec.name} from {key} is not in the model: {e}", key, (c.x, c.y), "fail", "stair"))
+                continue
             room = levels[key].inner_all.difference(blocked[key])
             for p in stair.prisms:
                 if p.part in ("tread", "landing"):

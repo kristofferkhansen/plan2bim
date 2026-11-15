@@ -43,6 +43,7 @@ from shapely.ops import unary_union
 
 from .arrange import Arrangement, Face
 from .level import Level
+from .model import Note
 from .project import Project
 from .stairs import area as stair_area
 
@@ -147,7 +148,7 @@ class Classified:
     swing: list[BaseGeometry]       # region each door symbol covers (leaf as drawn + swept sector)
     panels: list[Polygon] = field(default_factory=list)     # sliding doors and screens drawn on their own
     shafts: list[Polygon] = field(default_factory=list)     # cells marked with a cross: open to the storey below
-    notes: list[str] = field(default_factory=list)
+    notes: list[Note] = field(default_factory=list)
 
     def solids(self) -> list[tuple[Face, BaseGeometry]]:
         return [(f, f.mass) for f in self.arr.faces if f.kind in SOLID and not f.mass.is_empty]
@@ -624,7 +625,7 @@ def is_exterior(gross: BaseGeometry, fr: Frame, hole: BaseGeometry) -> bool:
 
 
 def find_balconies(arr: Arrangement, doors: list[Door], door_symbol: Callable[[Face], bool], gross: BaseGeometry,
-                   notes: list[str]) -> list[Balcony]:
+                   notes: list[Note]) -> list[Balcony]:
     """A space outside the gross outline that an exterior door opens onto and a balustrade surrounds.
 
     The balustrade is the closed strips around the space, each up to `BALUSTRADE` wide, with open air
@@ -648,7 +649,7 @@ def find_balconies(arr: Arrangement, doors: list[Door], door_symbol: Callable[[F
         c = d.rough.centroid
         where = f"door near ({c.x:.0f}, {c.y:.0f}) opens onto a closed outside area of {main.area / 1e6:.0f} m2"
         if main.area > BALCONY_MAX:
-            notes.append(f"{where}: too large for a balcony, not modelled")
+            notes.append(Note(f"{where}: too large for a balcony, not modelled", at=(c.x, c.y)))
             continue
         near = main.poly.buffer(300.0)
         rail: list[int] = []
@@ -669,7 +670,7 @@ def find_balconies(arr: Arrangement, doors: list[Door], door_symbol: Callable[[F
                 visited.add(nb)
                 stack.append(nb)
         if not rail or sum(faces[j].free for j in [main.id, *rail]) < 0.25 * main.perim:
-            notes.append(f"{where} with no balustrade round it: paving or another building, not modelled")
+            notes.append(Note(f"{where} with no balustrade round it: paving or another building, not modelled", at=(c.x, c.y)))
             continue
         floor = unary_union([faces[j].poly for j in [main.id, *swing, *rail]]).buffer(1.0).buffer(-1.0).difference(gross)
         floor = max(getattr(floor, "geoms", [floor]), key=lambda g: g.area)
@@ -686,7 +687,7 @@ def find_balconies(arr: Arrangement, doors: list[Door], door_symbol: Callable[[F
 
 def classify(project: Project, level: Level, arr: Arrangement, stair_areas: list[BaseGeometry] | None = None) -> Classified:
     faces = arr.faces
-    notes: list[str] = []
+    notes: list[Note] = []
     leaves = find_leaves(level)
     swings = [swing_region(level, lf) for lf in leaves]
     swing_tree = shapely.STRtree(swings) if swings else None
@@ -768,7 +769,8 @@ def classify(project: Project, level: Level, arr: Arrangement, stair_areas: list
             f.kind, f.why = "implied", f"{f.length:.0f} mm strip between two rooms, no door, no face drawn"
         if f.kind == "implied":
             c = f.poly.representative_point()
-            notes.append(f"implied wall near ({c.x:.0f}, {c.y:.0f}), about {f.perim / 2:.0f} x {width:.0f} mm: {f.why}")
+            notes.append(Note(f"implied wall near ({c.x:.0f}, {c.y:.0f}), about {f.perim / 2:.0f} x {width:.0f} mm: {f.why}",
+                              at=(c.x, c.y)))
 
     for key, x, y in project.solid_points:
         f = arr.at(x, y) if key == level.key else None
@@ -818,7 +820,8 @@ def classify(project: Project, level: Level, arr: Arrangement, stair_areas: list
     openings = find_openings(arr, taken, unary_union([faces[j].poly for j in panels]) if panels else None)
     balconies = find_balconies(arr, doors, door_symbol, gross, notes)
     for d in doors:
-        notes.extend(f"door near ({d.frame.origin[0]:.0f}, {d.frame.origin[1]:.0f}): {n}" for n in d.notes)
+        notes.extend(Note(f"door near ({d.frame.origin[0]:.0f}, {d.frame.origin[1]:.0f}): {n}", at=d.frame.origin)
+                     for n in d.notes)
     return Classified(level, arr, leaves, windows, doors, find_columns(level), openings, balconies, swings,
                       [faces[j].poly for j in panels], shafts, notes)
 

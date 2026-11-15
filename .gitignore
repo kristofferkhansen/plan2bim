@@ -2,6 +2,8 @@
 __pycache__/
 *.pyc
 .ruff_cache/
+.pytest_cache/
+dist/
 .DS_Store
 ._*
 
@@ -13,5 +15,5 @@ build/
 *.dxf
 *.ifc
 
-# Downloaded separately, see plan2bim/vendor/README.md
-plan2bim/vendor/three.min.js
+# The drawings of the example building are part of the repository
+!example/*.dxf

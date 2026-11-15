@@ -82,7 +82,7 @@ def payload(project: Project, levels: dict[str, Level], model: Model, solids: li
                    "x": round((pt.x - origin[0]) / 1000.0, 3), "y": round((pt.y - origin[1]) / 1000.0, 3)}
                   for sp in model.spaces for pt in [sp.poly.representative_point()]],
         "assumed": assumptions(project),
-        "notes": model.notes,
+        "notes": [n.text for n in model.notes],
     }
 
 

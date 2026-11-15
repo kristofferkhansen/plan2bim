@@ -1,29 +1,33 @@
 """Read one storey's drawing into plain geometry. No interpretation happens here.
 
-Drawing convention this reader expects (FDV area drawings as produced for
-Norwegian facility management):
+The project file says where the reader finds what (`project.Input`). The defaults are those of area
+drawings for Norwegian facility management:
 
-- layer ``0``           all building linework, as polylines (arcs as bulges)
+- layer ``0``           all building linework
 - layer ``Area_NTA``    one closed polyline per room, plus a block reference
                         with attributes ROOMNUMBER / ROOMNAME (/ WING)
 - layer ``Area_BTA``    gross outline of each separate building block
 - layer ``Area_BRA``    inner face of the exterior walls of each block
+
+Building lines are read from LWPOLYLINE, POLYLINE (2D), LINE, ARC and CIRCLE. All of them become
+polylines with bulges. What else lies on a layer that the reader uses is counted and reported.
 """
 from __future__ import annotations
 
 import math
 import shutil
 import subprocess
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import ezdxf
 import numpy as np
 
-LAYER_LINES = "0"
-LAYER_ROOMS = "Area_NTA"
-LAYER_GROSS = "Area_BTA"
-LAYER_INNER = "Area_BRA"
+from .errors import InputError
+from .project import UNITS, Input
+
+INSUNITS = {4: "mm", 5: "cm", 6: "m"}       # $INSUNITS of the DXF header, for the units this reader takes
 
 
 @dataclass
@@ -66,52 +70,91 @@ class Label:
 @dataclass
 class Drawing:
     key: str
-    lines: list[Poly] = field(default_factory=list)     # layer 0
-    rooms: list[Poly] = field(default_factory=list)     # Area_NTA polylines (rooms and separators)
-    gross: list[Poly] = field(default_factory=list)     # Area_BTA
-    inner: list[Poly] = field(default_factory=list)     # Area_BRA
+    lines: list[Poly] = field(default_factory=list)     # building lines
+    rooms: list[Poly] = field(default_factory=list)     # room outlines and separators
+    gross: list[Poly] = field(default_factory=list)     # gross outline of each block
+    inner: list[Poly] = field(default_factory=list)     # inner face of the exterior walls
     labels: list[Label] = field(default_factory=list)
-    other: dict[str, int] = field(default_factory=dict)  # entities this reader does not use, by "TYPE@layer"
+    notes: list[str] = field(default_factory=list)      # what a person must know about this drawing
 
 
-def dwg_to_dxf(dwg: Path, dxf: Path) -> Path:
-    """Convert with LibreDWG's dwg2dxf. The result is cached next to the other outputs."""
-    if dxf.exists() and dxf.stat().st_mtime >= dwg.stat().st_mtime:
-        return dxf
+def to_dxf(drawing: Path, cache: Path) -> Path:
+    """The drawing as DXF. A DXF is used as it is. A DWG is converted with LibreDWG's dwg2dxf, once, to `cache`."""
+    if drawing.suffix.lower() == ".dxf":
+        return drawing
+    if cache.exists() and cache.stat().st_mtime >= drawing.stat().st_mtime:
+        return cache
     exe = shutil.which("dwg2dxf")
     if not exe:
-        raise RuntimeError("dwg2dxf is not on PATH. It is part of LibreDWG: https://www.gnu.org/software/libredwg/")
-    dxf.parent.mkdir(parents=True, exist_ok=True)
-    r = subprocess.run([exe, "-y", "-o", str(dxf), str(dwg)], capture_output=True, text=True, check=False)
-    if not dxf.exists() or dxf.stat().st_size == 0:
-        raise RuntimeError(f"dwg2dxf failed for {dwg.name}: {r.stderr[-400:]}")
-    return dxf
+        raise InputError(f"{drawing.name} is a DWG, and dwg2dxf is not on the PATH. Install LibreDWG "
+                         "(https://www.gnu.org/software/libredwg/), or convert the drawing to DXF with another "
+                         "tool and name the DXF in the project file.")
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    r = subprocess.run([exe, "-y", "-o", str(cache), str(drawing)], capture_output=True, text=True, check=False)
+    if not cache.exists() or cache.stat().st_size == 0:
+        raise InputError(f"dwg2dxf cannot convert {drawing.name}: {r.stderr.strip()[-400:] or 'no output'}. "
+                         "Convert the drawing to DXF with another tool and name the DXF in the project file.")
+    return cache
 
 
-def read(key: str, dxf: Path) -> Drawing:
-    doc = ezdxf.readfile(dxf)
+def document(dxf: Path):
+    """The DXF document, with a message for a person when it cannot be read."""
+    try:
+        return ezdxf.readfile(dxf)
+    except (OSError, ezdxf.DXFError) as e:
+        raise InputError(f"{dxf.name} cannot be read as DXF: {e}") from e
+
+
+def read(key: str, dxf: Path, inp: Input) -> Drawing:
+    doc = document(dxf)
+    k = UNITS[inp.unit]
     d = Drawing(key)
+    said = INSUNITS.get(doc.header.get("$INSUNITS", 0))
+    if said and said != inp.unit:
+        d.notes.append(f"the drawing says that its unit is {said}; it is read in {inp.unit}, as the project file says")
+    buckets = {layer.casefold(): bucket
+               for bucket, layers in ((d.lines, inp.lines), (d.rooms, inp.rooms), (d.gross, inp.gross), (d.inner, inp.inner))
+               for layer in layers}
+    number, name, wing = inp.room_number.upper(), inp.room_name.upper(), inp.room_wing.upper()
+    unread: Counter[tuple[str, str]] = Counter()     # on a layer that the reader uses, of a kind it does not read
+    layers: Counter[str] = Counter()
     for e in doc.modelspace():
         t, layer = e.dxftype(), e.dxf.layer
+        layers[layer] += 1
+        bucket = buckets.get(layer.casefold())
+        if bucket is None:
+            continue
+        linetype = e.dxf.get("linetype", "BYLAYER")
         if t == "LWPOLYLINE":
-            p = Poly([(x, y, b) for x, y, b in e.get_points("xyb")], bool(e.closed), e.dxf.handle,
-                     e.dxf.get("linetype", "BYLAYER"))
-            target = {LAYER_LINES: d.lines, LAYER_ROOMS: d.rooms, LAYER_GROSS: d.gross, LAYER_INNER: d.inner}.get(layer)
-            if target is not None:
-                target.append(p)
-                continue
-        elif t == "LINE" and layer in (LAYER_LINES, LAYER_ROOMS):
-            p = Poly([(e.dxf.start.x, e.dxf.start.y, 0.0), (e.dxf.end.x, e.dxf.end.y, 0.0)], False, e.dxf.handle,
-                     e.dxf.get("linetype", "BYLAYER"))
-            (d.lines if layer == LAYER_LINES else d.rooms).append(p)
-            continue
-        elif t == "INSERT" and layer == LAYER_ROOMS:
+            bucket.append(Poly([(x * k, y * k, b) for x, y, b in e.get_points("xyb")], bool(e.closed), e.dxf.handle, linetype))
+        elif t == "POLYLINE" and e.is_2d_polyline:
+            pts = [(v.dxf.location.x * k, v.dxf.location.y * k, v.dxf.get("bulge", 0.0)) for v in e.vertices]
+            bucket.append(Poly(pts, bool(e.is_closed), e.dxf.handle, linetype))
+        elif t == "LINE" and (bucket is d.lines or bucket is d.rooms):
+            bucket.append(Poly([(e.dxf.start.x * k, e.dxf.start.y * k, 0.0), (e.dxf.end.x * k, e.dxf.end.y * k, 0.0)],
+                               False, e.dxf.handle, linetype))
+        elif t == "ARC" and bucket is d.lines:
+            sweep = math.radians(e.dxf.end_angle - e.dxf.start_angle) % math.tau or math.tau
+            bulge = math.tan(sweep / 4.0) * (-1.0 if e.dxf.extrusion.z < 0 else 1.0)    # a mirrored arc turns the other way
+            p, q = e.start_point, e.end_point
+            bucket.append(Poly([(p.x * k, p.y * k, bulge), (q.x * k, q.y * k, 0.0)], False, e.dxf.handle, linetype))
+        elif t == "CIRCLE" and bucket is d.lines:
+            c, r = e.ocs().to_wcs(e.dxf.center), e.dxf.radius
+            bucket.append(Poly([((c.x - r) * k, c.y * k, 1.0), ((c.x + r) * k, c.y * k, 1.0)], True, e.dxf.handle, linetype))
+        elif t == "INSERT" and bucket is d.rooms:
             a = {x.dxf.tag.upper(): (x.dxf.text or "").strip() for x in e.attribs}
-            d.labels.append(Label(e.dxf.insert.x, e.dxf.insert.y, a.get("ROOMNUMBER", ""), a.get("ROOMNAME", ""),
-                                  a.get("WING", ""), e.dxf.handle))
-            continue
-        k = f"{t}@{layer}"
-        d.other[k] = d.other.get(k, 0) + 1
+            d.labels.append(Label(e.dxf.insert.x * k, e.dxf.insert.y * k, a.get(number, ""), a.get(name, ""),
+                                  a.get(wing, ""), e.dxf.handle))
+        else:
+            unread[(t, layer)] += 1
+    for what, bucket, wanted in (("building lines", d.lines, inp.lines), ("gross outline", d.gross, inp.gross)):
+        if not bucket:
+            found = ", ".join(f"{layer} ({n})" for layer, n in layers.most_common(12)) or "none"
+            raise InputError(f'storey {key}: {dxf.name} holds no {what} on layer {" or ".join(wanted)}. Its layers, with '
+                             f"the number of entities on each: {found}. Name the layers in [input] of the project file.")
+    if unread:
+        kinds = ", ".join(f"{n} {t} on layer {layer}" for (t, layer), n in unread.most_common())
+        d.notes.append(f"not read, because the reader does not take this kind of entity on that layer: {kinds}")
     return d
 
 

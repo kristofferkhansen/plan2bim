@@ -1,0 +1,13 @@
+Copyright (c) 2026 Kristoffer Konstad Hansen. All rights reserved.
+
+This software and its documentation are the property of the copyright holder.
+No licence is given to use, copy, change or distribute them, in whole or in
+part, without the written permission of the copyright holder.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED. IN NO EVENT IS THE COPYRIGHT HOLDER LIABLE FOR ANY CLAIM, DAMAGES OR
+OTHER LIABILITY THAT ARISES FROM THE SOFTWARE OR FROM ITS USE.
+
+Software of other parties in this repository keeps its own licence:
+plan2bim/vendor/three.min.js is three.js r149 under the MIT licence. See
+plan2bim/vendor/README.md.

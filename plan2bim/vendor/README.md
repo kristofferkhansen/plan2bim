@@ -1,12 +1,35 @@
 # three.js
 
-The viewer uses three.js r149 (MIT licence, https://threejs.org). `plan2bim/web.py` reads it from
-`plan2bim/vendor/three.min.js` and copies it into each `NAME.html`.
-
-Download it once, from the repository root:
+The viewer uses three.js r149 (https://threejs.org). `three.min.js` is the file
+https://unpkg.com/three@0.149.0/build/three.min.js, unchanged:
 
 ```sh
-curl -L -o plan2bim/vendor/three.min.js https://unpkg.com/three@0.149.0/build/three.min.js
 sha256sum plan2bim/vendor/three.min.js
 # 8a5f7249903b54d30f79f708699d2fed2d6a1d0741a4cd41377d1f01bb5a2271
 ```
+
+`plan2bim/web.py` copies it into each `NAME.html`, so the viewer needs no network.
+
+## Licence of three.js
+
+The MIT License
+
+Copyright © 2010-2023 three.js authors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.

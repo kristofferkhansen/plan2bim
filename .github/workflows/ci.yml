@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+      - run: uv sync --frozen
+      - run: uv run ruff check .
+      - run: uv run pytest -q
+      # the example has no flaw: --strict fails the job on anything to look at
+      - run: uv run plan2bim build example/example.toml --strict
+
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: docker build -t plan2bim .
+      - run: docker run --rm plan2bim --version
+      - run: |
+          mkdir out && chmod 777 out
+          docker run --rm --network none -v "$PWD/example":/work:ro -v "$PWD/out":/out \
+            plan2bim build /work/example.toml --out /out --strict

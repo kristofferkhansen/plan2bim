@@ -14,13 +14,15 @@ A plan holds no heights, so every height here comes from the project file. The r
 """
 from __future__ import annotations
 
+import math
+
 from shapely.geometry import Polygon
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import unary_union
 
 from .classify import Classified, Frame, Leaf
 from .level import Level
-from .model import Element, Model, Piece, Space, pieces, polygons
+from .model import Element, Model, Note, Piece, Space, pieces, polygons
 from .project import Project
 from .stairs import Stair
 
@@ -30,7 +32,6 @@ ROOF_MIN = 150.0        # a roof strip narrower than twice this is a mismatch be
 JOINT = 5.0             # floor areas this close to each other are one floor
 HAIR = 0.5              # a strip of wall thinner than twice this does not part a floor
 FLOORED = ("room", "space", "stair", "swing", "gap")    # kinds of plan cell that people stand on
-SHAFTS = ("heis", "sjakt")
 MATERIAL = {"tread": "stair", "landing": "stair", "post": "rail", "rail": "rail"}
 
 
@@ -93,8 +94,9 @@ def assemble(project: Project, levels: dict[str, Level], cls: dict[str, Classifi
                                      void=Piece(d.rough, floor_top, head, "void"), exterior=d.exterior))
             parts = [p for j in d.jambs for p in pieces(faces[j].poly, floor_top, head, "frame")]
             parts += [p for lf in d.leaves for p in pieces(_closed_leaf(lf, d.rough), floor_top, head, "leaf")]
+            along = d.frame.extent(d.rough)
             model.add(Element("door", key, f"Door {key}-{d.id}", parts, host=host, exterior=d.exterior,
-                              note="; ".join(d.notes)))
+                              note="; ".join(d.notes), size=(along[1] - along[0], h.door_head)))
             thresholds.append(d.rough)
 
         for w in c.windows:
@@ -119,7 +121,7 @@ def assemble(project: Project, levels: dict[str, Level], cls: dict[str, Classifi
                 if held > most:                        # the window fills the part of the bay that holds its joinery
                     host, most = index, held
             model.add(Element("window", key, f"Window {key}-{w.id}", parts, host=host, exterior=w.exterior,
-                              note="; ".join(w.notes)))
+                              note="; ".join(w.notes), size=(w.s[1] - w.s[0], h.window_head - h.window_sill)))
             if w.exterior:
                 deep.append(w.bay)
 
@@ -129,8 +131,10 @@ def assemble(project: Project, levels: dict[str, Level], cls: dict[str, Classifi
             thresholds.append(gap)
             sliding = [p for p in c.panels if p.intersection(gap).area > 0.5 * p.area]
             if sliding:
+                clear = math.dist(gap.exterior.coords[1], gap.exterior.coords[2])    # `find_openings`: wall end to wall end
                 model.add(Element("door", key, f"Sliding doors {key}-{i}",
-                                  [q for p in sliding for q in pieces(p, floor_top, head, "leaf")], host=host))
+                                  [q for p in sliding for q in pieces(p, floor_top, head, "leaf")], host=host,
+                                  size=(clear, h.door_head)))
         screens = [p for p in c.panels if not any(p.intersection(gap).area > 0.5 * p.area for gap in c.openings)]
         if screens:                                    # panels that stand in no opening of a wall
             model.add(Element("door", key, f"Screens {key}", [q for p in screens for q in pieces(p, floor_top, head, "leaf")]))
@@ -152,7 +156,7 @@ def assemble(project: Project, levels: dict[str, Level], cls: dict[str, Classifi
         floor = floor.difference(mass)
         holes = [(f"stair {st.name} from {project.level(st.level).name}", st.hole) for st in stairs
                  if (above := project.above(st.level)) is not None and above.key == key]
-        shafts = [r for r in level.rooms if r.name.strip().lower() in SHAFTS]
+        shafts = [r for r in level.rooms if r.name.strip().lower() in project.input.shafts]
         holes += [(f"{r.number} {r.name}, which comes up from the storey below", r.poly) for r in shafts
                   if r.poly.intersection(shafts_below).area > 0.5 * r.poly.area]
         holes += [("cell marked with a cross", p) for p in c.shafts]
@@ -174,7 +178,8 @@ def assemble(project: Project, levels: dict[str, Level], cls: dict[str, Classifi
         model.add(Element("roof", key, f"Roof over {spec.name}", pieces(roof, top, top + h.plate, "roof"), exterior=True))
 
         model.spaces += [Space(key, r.number, r.name, r.poly, floor_top, top) for r in level.rooms]
-        model.notes += [f"{spec.name}: {n}" for n in (*level.notes, *c.notes)]
+        model.notes += [Note(f"{spec.name}: {n}", key) for n in level.notes]
+        model.notes += [Note(f"{spec.name}: {n.text}", key, n.at) for n in c.notes]
 
     for st in stairs:
         upper = project.above(st.level)
@@ -185,5 +190,5 @@ def assemble(project: Project, levels: dict[str, Level], cls: dict[str, Classifi
             if q.z1 > ceiling:                      # through the plate: only inside the hole left for the stair
                 parts += pieces(q.poly.intersection(st.hole), max(q.z0, ceiling), q.z1, MATERIAL[q.part])
         model.add(Element("stair", st.level, stair_name(project, st), parts))
-        model.notes += [f"stair {st.name} from {st.level}: {n}" for n in st.notes]
+        model.notes += [Note(f"stair {st.name} from {st.level}: {n}", st.level) for n in st.notes]
     return model

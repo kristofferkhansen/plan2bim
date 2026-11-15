@@ -5,10 +5,16 @@ or a window in it is written the way IFC holds it: the wall without the hole, th
 that cuts it, and the door or window that fills the opening. What is left after the cut is the solid
 of the model. All other elements are written as they are.
 
-Lengths are millimetres and the coordinates are those of the reference drawing.
+Doors and windows carry their overall width and height. Walls, plates, columns, doors, windows and rooms
+carry base quantities, taken from the solids of the model. Materials and element types are not written:
+the drawings hold neither.
+
+Lengths are millimetres and the coordinates are those of the reference drawing. With `[georeference]` in
+the project file, the file says where that frame lies on the map.
 """
 from __future__ import annotations
 
+import math
 import uuid
 from pathlib import Path
 
@@ -16,9 +22,11 @@ import ifcopenshell
 import ifcopenshell.guid
 import shapely
 from shapely.geometry.polygon import orient
+from shapely.ops import unary_union
 
+from . import __version__
 from .mesh import category
-from .model import Element, Model, Piece, polygons
+from .model import Element, Model, Piece, Space, polygons
 from .project import Project
 
 SPACE = uuid.UUID("6f1d3c0a-2a53-4a43-9d7b-3f8b1c2e9a10")       # namespace: the same model gives the same ids
@@ -52,12 +60,26 @@ class Writer:
             f.create_entity("IfcSIUnit", UnitType="AREAUNIT", Name="SQUARE_METRE"),
             f.create_entity("IfcSIUnit", UnitType="VOLUMEUNIT", Name="CUBIC_METRE"),
             f.create_entity("IfcSIUnit", UnitType="PLANEANGLEUNIT", Name="RADIAN")])
-        context = f.create_entity("IfcGeometricRepresentationContext", ContextType="Model", CoordinateSpaceDimension=3,
-                                  Precision=0.01, WorldCoordinateSystem=self.axes(0.0))
+        self.context = context = f.create_entity(
+            "IfcGeometricRepresentationContext", ContextType="Model", CoordinateSpaceDimension=3, Precision=0.01,
+            WorldCoordinateSystem=self.axes(0.0))
         self.body = f.create_entity("IfcGeometricRepresentationSubContext", ContextIdentifier="Body", ContextType="Model",
                                     ParentContext=context, TargetView="MODEL_VIEW")
         self.root = f.create_entity("IfcProject", GlobalId=self.guid("project"), Name=project.name,
                                     RepresentationContexts=[context], UnitsInContext=units)
+        f.header.file_name.originating_system = f"plan2bim {__version__}"
+        if project.author:
+            f.header.file_name.author = (project.author,)
+        if project.organization:
+            f.header.file_name.organization = (project.organization,)
+        if project.georeference:
+            g = project.georeference
+            crs = f.create_entity("IfcProjectedCRS", Name=g.crs,
+                                  MapUnit=f.create_entity("IfcSIUnit", UnitType="LENGTHUNIT", Name="METRE"))
+            turn = math.radians(g.rotation)
+            f.create_entity("IfcMapConversion", SourceCRS=context, TargetCRS=crs, Eastings=g.eastings, Northings=g.northings,
+                            OrthogonalHeight=g.height, XAxisAbscissa=math.cos(turn), XAxisOrdinate=math.sin(turn),
+                            Scale=0.001)       # the model is in mm, the map in m
 
     def guid(self, *key: object) -> str:
         return ifcopenshell.guid.compress(uuid.uuid5(SPACE, "/".join(str(k) for k in (self.project.name, *key))).hex)
@@ -114,6 +136,39 @@ class Writer:
     def relate(self, kind: str, key: str, **attributes):
         return self.f.create_entity(kind, GlobalId=self.guid(kind, key), **attributes)
 
+    def quantities(self, thing, key: str, name: str, values: dict[str, tuple[str, float]]) -> None:
+        """Base quantities of a product. Each value is ("Length", mm), ("Area", m2) or ("Volume", m3)."""
+        items = [self.f.create_entity(f"IfcQuantity{kind}", Name=n, **{f"{kind}Value": round(float(v), 4)})
+                 for n, (kind, v) in values.items()]
+        qto = self.relate("IfcElementQuantity", key, Name=name, Quantities=items)
+        self.relate("IfcRelDefinesByProperties", f"quantities/{key}", RelatedObjects=[thing], RelatingPropertyDefinition=qto)
+
+
+def _quantities(e: Element) -> tuple[str, dict[str, tuple[str, float]]] | None:
+    """The base quantities of an element, from its solids as the model holds them."""
+    if e.kind in ("door", "window"):
+        if e.size is None:
+            return None
+        name = "Qto_DoorBaseQuantities" if e.kind == "door" else "Qto_WindowBaseQuantities"
+        return name, {"Width": ("Length", e.size[0]), "Height": ("Length", e.size[1]),
+                      "Area": ("Area", e.size[0] * e.size[1] / 1e6)}
+    if not e.pieces or e.kind not in ("wall", "slab", "roof", "column"):
+        return None
+    plan = unary_union([p.poly for p in e.pieces]).area / 1e6
+    height = max(p.z1 for p in e.pieces) - min(p.z0 for p in e.pieces)
+    volume = ("Volume", sum(p.poly.area * (p.z1 - p.z0) for p in e.pieces) / 1e9)
+    if e.kind == "wall":
+        return "Qto_WallBaseQuantities", {"Height": ("Length", height), "NetFootprintArea": ("Area", plan), "NetVolume": volume}
+    if e.kind == "column":
+        return "Qto_ColumnBaseQuantities", {"Length": ("Length", height), "CrossSectionArea": ("Area", plan), "NetVolume": volume}
+    return "Qto_SlabBaseQuantities", {"Width": ("Length", height), "NetArea": ("Area", plan), "NetVolume": volume}
+
+
+def _room(s: Space) -> dict[str, tuple[str, float]]:
+    """The base quantities of a room. Its outline is the net area outline of the drawing."""
+    return {"NetFloorArea": ("Area", s.poly.area / 1e6), "Height": ("Length", s.z1 - s.z0),
+            "GrossPerimeter": ("Length", s.poly.exterior.length), "NetVolume": ("Volume", s.poly.area * (s.z1 - s.z0) / 1e9)}
+
 
 def _whole(e: Element) -> tuple[list[Piece], list[Piece]]:
     """A wall with a hole in it, as IFC holds it: the wall without the hole, and the hole to cut out of it.
@@ -166,8 +221,12 @@ def write(path: Path, project: Project, model: Model) -> int:
     for i, e in enumerate(model.elements):
         kind, predefined = CLASS[e.kind]
         parts, hole = _whole(e) if e.void is not None else (e.pieces, [])
+        size = {"OverallWidth": round(e.size[0], 2), "OverallHeight": round(e.size[1], 2)} if e.size else {}
         made[i] = thing = product(kind, f"{i}/{e.name}", e.level, parts, lambda p, e=e: f"{category(e, p)}/{p.material}",
-                                  Name=e.name, Description=e.note or None, PredefinedType=predefined)
+                                  Name=e.name, Description=e.note or None, PredefinedType=predefined, **size)
+        measured = _quantities(e)
+        if measured:
+            w.quantities(thing, f"{i}/{e.name}", *measured)
         contained[e.level].append(thing)
         common.setdefault((kind, e.exterior), []).append(thing)
         if hole:
@@ -190,10 +249,12 @@ def write(path: Path, project: Project, model: Model) -> int:
         parts = [Piece(p, s.z0, s.z1, "space") for p in polygons(s.poly)]
         rooms[s.level].append(product("IfcSpace", f"{i}/{s.number}", s.level, parts, None, Name=s.number or None,
                                       LongName=s.name or None, CompositionType="ELEMENT", PredefinedType="INTERNAL"))
+        w.quantities(rooms[s.level][-1], f"space/{i}/{s.number}", "Qto_SpaceBaseQuantities", _room(s))
     for key, spaces in rooms.items():
         if spaces:
             w.relate("IfcRelAggregates", f"spaces/{key}", RelatingObject=storeys[key], RelatedObjects=spaces)
 
     path.parent.mkdir(parents=True, exist_ok=True)
+    f.header.file_name.name = path.name
     f.write(str(path))
     return len(made)

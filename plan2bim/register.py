@@ -24,9 +24,9 @@ from scipy.spatial import cKDTree
 from shapely.geometry import Point, Polygon
 
 from . import source
+from .errors import InputError
 from .project import Project
 
-CORE_NAMES = ("heis", "trapp", "sjakt")     # rooms that run through all storeys
 ROOM_TOL = 60.0                             # same room on two storeys: size differs by less than this
 FINE_WINDOW = 60.0                          # a coarse translation is trusted to this
 MIN_EXACT = 8                               # coincident end points needed to accept a translation
@@ -185,12 +185,12 @@ def _refine_axis(p: np.ndarray, q: np.ndarray, coarse: float) -> tuple[float, li
     return float(np.median(near)), ranked[:3]
 
 
-def _coarse_from_rooms(a: _Features, b: _Features) -> tuple[tuple[float, float], float, int] | None:
+def _coarse_from_rooms(a: _Features, b: _Features, cores: tuple[str, ...]) -> tuple[tuple[float, float], float, int] | None:
     cand = []
     for xa, ya, wa, ha, na in a.rooms:
         for xb, yb, wb, hb, nb in b.rooms:
             if abs(wa - wb) <= ROOM_TOL and abs(ha - hb) <= ROOM_TOL:
-                core = any(c in na.lower() for c in CORE_NAMES) and any(c in nb.lower() for c in CORE_NAMES)
+                core = any(c in na.lower() for c in cores) and any(c in nb.lower() for c in cores)
                 cand.append((xb - xa, yb - ya, 4.0 if core else 1.0))
     if not cand:
         return None
@@ -214,8 +214,11 @@ def _coarse_from_arcs(a: _Features, b: _Features) -> tuple[float, float] | None:
     return (float(c[i, 0]), float(c[i, 1])) if n[i] >= 2 else None
 
 
-def _match(a: _Features, b: _Features) -> tuple[tuple[float, float], dict] | None:
-    """Translation that puts block `a` on block `b`, or None when the evidence is too thin."""
+def _match(a: _Features, b: _Features, cores: tuple[str, ...]) -> tuple[tuple[float, float], dict] | None:
+    """Translation that puts block `a` on block `b`, or None when the evidence is too thin.
+
+    `cores` are words in the names of the rooms that run through all storeys: lifts, stairs, shafts.
+    """
     if len(a.pts) == 0 or len(b.pts) == 0:
         return None
     t = _coarse_from_arcs(a, b)
@@ -223,7 +226,7 @@ def _match(a: _Features, b: _Features) -> tuple[tuple[float, float], dict] | Non
         n = len(_exact_pairs(a.pts, b.pts, t))
         if n >= MIN_EXACT:
             return t, {"method": "arcs with equal radius", "exact_points": n}
-    rooms = _coarse_from_rooms(a, b)
+    rooms = _coarse_from_rooms(a, b, cores)
     if rooms is not None and rooms[1] >= 6.0:
         coarse, _, count = rooms
         tx, vx = _refine_axis(a.pts[:, 0], b.pts[:, 0], coarse[0])
@@ -260,7 +263,7 @@ def register(project: Project, drawings: dict[str, source.Drawing]) -> dict[str,
             refs = sorted((r for bl in blocks.values() for r in bl if r.placed and r.level != b.level),
                           key=lambda r: (abs(elev[r.level] - elev[b.level]), -r.outline.area))
             for r in refs:
-                m = _match(feats[b.id], feats[r.id])
+                m = _match(feats[b.id], feats[r.id], project.input.cores)
                 if m is None:
                     continue
                 (tx, ty), ev = m
@@ -270,8 +273,8 @@ def register(project: Project, drawings: dict[str, source.Drawing]) -> dict[str,
                 progress = True
                 break
     if todo:
-        raise RuntimeError("no registration found for block(s) " + ", ".join(b.id for b in todo)
-                           + '. Pin them in the project file: [registration] "level/block" = [tx, ty]')
+        raise InputError("no registration found for block(s) " + ", ".join(b.id for b in todo)
+                         + '. Pin them in the project file: [registration] "level/block" = [tx, ty]')
     return blocks
 
 

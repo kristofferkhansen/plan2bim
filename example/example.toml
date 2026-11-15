@@ -1,0 +1,98 @@
+# Project file for plan2bim: plan2bim build example/example.toml
+# The drawings of this example are made by example/draw.py. Lengths are in mm.
+name = "Example building"
+out = "out"              # directory for the outputs, relative to this file
+reference = "1"          # storey whose drawing coordinates become the model frame
+# author = "A. Person"           # optional: written to the IFC file
+# organization = "A company"
+
+# Not in the drawings. A plan drawing holds no height, section or elevation.
+[heights]
+roof = 5760              # top of the roof plate over the top storey
+plate = 300              # floor and roof plate thickness
+door_head = 2100
+window_sill = 900
+window_head = 2100
+landing = 200            # stair landings, and the stair under each tread
+balustrade = 1100        # balcony balustrades and stair guards
+
+# One drawing for each storey, DWG or DXF. `elevation` is the top of the structural floor.
+[[level]]
+key = "1"
+name = "Level 1"
+drawing = "level-1.dxf"
+elevation = 0
+
+[[level]]
+key = "2"
+name = "Level 2"
+drawing = "level-2.dxf"
+elevation = 2880
+
+# Stairs. The treads are read from the drawings. A plan does not show which way a stair climbs.
+# Coordinates are in the model frame, which is the frame of the reference drawing.
+[[stair]]
+name = "A"
+kind = "straight"
+levels = ["1"]                        # storeys from which this stair climbs one storey
+box = [1200, 6400, 6000, 7700]        # the shaft: x0, y0, x1, y1
+up = "E"                              # direction of climb: N, S, E or W
+# draw_level = "2"                    # storey whose drawing shows the whole stair, if it is not the storey itself
+
+# The other kinds of stair:
+# [[stair]]
+# name = "B"
+# kind = "dogleg"
+# levels = ["1"]
+# box = [12000, 4000, 14700, 8500]
+# entry = "N"                         # side of the shaft with the storey landing: N, S, E or W
+# up = "E"                            # side of the flight that leaves the storey landing upwards
+#
+# [[stair]]
+# name = "C"
+# kind = "spiral"
+# levels = ["1"]
+# at = [30000, 9000]                  # about where its centre is
+# start_deg = 0                       # direction of the first riser, counter-clockwise from +x
+# sweep_deg = 360                     # total turn, positive counter-clockwise
+
+# The convention of the drawings. Each value below, apart from `shafts` and `cores`, is the default.
+[input]
+unit = "mm"                           # unit of the drawing coordinates: mm, cm or m
+lines = "0"                           # layer, or list of layers, with the building lines
+rooms = "Area_NTA"                    # room outlines and room labels
+gross = "Area_BTA"                    # gross outline of each building block
+inner = "Area_BRA"                    # inner face of the exterior walls
+room_number = "ROOMNUMBER"            # attribute tags of the room label block
+room_name = "ROOMNAME"
+room_wing = "WING"
+shafts = ["lift", "shaft"]            # room names of lifts and shafts: no floor in them above the lowest storey
+cores = ["lift", "stair", "shaft"]    # words in the names of rooms that run through all storeys (default: Norwegian)
+
+# Optional. Limits that decide whether a finished build passes. These are the defaults.
+# [gates]
+# on_line = 0.98         # least share of the cut model outline that lies on a drawn line, per storey
+# unexplained = 0.005    # largest share of a gross outline that is neither room, wall, opening nor floor
+# riser = [150, 190]     # usual riser in mm; outside it a floor-to-floor height is in doubt
+
+# Optional. The defaults are in plan2bim/project.py.
+# [tolerances]
+# close = 4.0            # a line end this near another line was meant to touch it
+
+# Optional. Pin the translation of a building block for which no registration is found.
+# The key is the block as NAME.txt names it. The value is added to drawing coordinates.
+# [registration]
+# "2/1" = [0.0, 0.0]
+
+# Optional. Decisions from a review: force the cell at a point to be solid or open. Each point is [storey, x, y].
+# [review]
+# solid = [["1", 15000.0, 6000.0]]
+# open = [["1", 21000.0, 6000.0]]
+
+# Optional. Where the model frame lies on the map. It is written to the IFC file.
+# [georeference]
+# crs = "EPSG:25832"
+# eastings = 598000.0    # map coordinates of the model origin, in m
+# northings = 6643000.0
+# height = 12.5          # map height of model z = 0, in m
+# rotation = 0.0         # degrees, counter-clockwise from map east to the x axis of the model

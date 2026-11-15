@@ -136,7 +136,7 @@ def _clean_polygon(ring: list[tuple[float, float]]) -> tuple[Polygon | None, str
 def build(project: Project, d: source.Drawing, blocks: list[Block]) -> Level:
     tol = project.tol
     grid = tol.grid
-    notes: list[str] = []
+    notes: list[str] = list(d.notes)
 
     def t_of(x: float, y: float) -> tuple[tuple[float, float], int]:
         i = block_index(blocks, x, y)

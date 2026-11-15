@@ -1,7 +1,10 @@
 [project]
 name = "plan2bim"
-version = "0.1.0"
-description = "DWG floor plans -> 3D building model (IFC file and web viewer)"
+dynamic = ["version"]
+description = "Floor plan drawings (DWG or DXF) -> 3D building model (IFC file and web viewer)"
+readme = "README.md"
+license = "LicenseRef-Proprietary"
+license-files = ["LICENSE"]
 requires-python = ">=3.12,<3.14"
 dependencies = [
     "ezdxf>=1.4",       # read DXF geometry, layers, block attributes
@@ -12,5 +15,21 @@ dependencies = [
     "manifold3d>=3.5.5",    # join prisms into closed solids, find solids that overlap
 ]
 
-[tool.uv]
-package = false
+[project.scripts]
+plan2bim = "plan2bim.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.9"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "plan2bim/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["plan2bim"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

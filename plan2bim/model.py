@@ -13,6 +13,16 @@ MITRE = 10.0            # corners keep their point down to an angle of about 12 
 
 
 @dataclass
+class Note:
+    """Something a person must know: what the reader decided in a drawing, or what a check found."""
+    text: str
+    level: str = ""                             # storey key, where the note belongs to one storey
+    at: tuple[float, float] | None = None       # model coordinates, where the note has a place
+    severity: str = "warn"                      # "info": for the record | "warn": look at it | "fail": the build is wrong
+    check: str = "drawing"                      # what found it
+
+
+@dataclass
 class Piece:
     poly: Polygon
     z0: float
@@ -30,6 +40,7 @@ class Element:
     host: int = -1                  # door, window: index of the wall it sits in
     exterior: bool = False
     note: str = ""
+    size: tuple[float, float] | None = None     # door, window: overall width and height, mm
 
 
 @dataclass
@@ -49,7 +60,7 @@ class Model:
     spaces: list[Space] = field(default_factory=list)
     # per storey: what its floor plate leaves open, and why
     holes: dict[str, list[tuple[str, BaseGeometry]]] = field(default_factory=dict)
-    notes: list[str] = field(default_factory=list)
+    notes: list[Note] = field(default_factory=list)
 
     def open_floor(self, key: str) -> BaseGeometry:
         """Plan of what the floor plate of a storey leaves open."""

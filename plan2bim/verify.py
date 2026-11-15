@@ -8,9 +8,11 @@
 4. Look up and down: every room has a floor under it and a plate over it, every hole in a floor is
    named with the rooms it takes floor from, and each stair, as the model holds it, climbs in equal
    steps from its own floor to the next.
-5. Read the IFC file back with another geometry kernel.
+5. Read the IFC file back with another geometry kernel, and validate it against the IFC4 schema.
 
-Nothing here changes the model. What it finds is for a person to read.
+Nothing here changes the model. Each thing found is a `Note` with a severity: "fail" where the model or
+the file is wrong, "warn" where a person must look, "info" for the record. The gates of the project file
+(`project.Gates`) turn two numbers of each storey into a failure. `Report.status` is the worst severity.
 
 What these checks cannot see: a height, because the drawings hold none; and a cell that is given the
 wrong meaning where both meanings have the same outline in plan.
@@ -19,7 +21,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from itertools import pairwise
 from pathlib import Path
 
@@ -33,8 +35,8 @@ from .assemble import stair_name
 from .classify import Classified
 from .level import Level
 from .mesh import Solid, section
-from .model import Model
-from .project import Project
+from .model import Model, Note
+from .project import Gates, Project
 from .stairs import Stair
 from .stairs import area as stair_area
 
@@ -47,6 +49,7 @@ SWING = (200.0, 1500.0, 100.0)     # an arc of this radius range in mm and at mo
 PATCH = 0.05e6          # mm2: a smaller patch of plan is not named in the balance of areas
 MOST = 6                # patches named for each term of the balance
 OUTSIDE = 0.05          # share of a door or window that may lie outside the opening it fills
+CUT_APART = 1000.0      # mm2: the plan cut of the IFC file and that of the model may differ by this
 
 
 @dataclass
@@ -73,15 +76,58 @@ class Storey:
     drawn_off: list[Finding]        # drawn lines that nothing in the model explains
     buried: list[Finding]           # the longest runs of line inside walls
     areas: dict[str, float] = field(default_factory=dict)       # mm2 of plan, see `areas`
-    patches: list[str] = field(default_factory=list)            # where the balance of areas leaves something over
+    patches: list[Note] = field(default_factory=list)           # where the balance of areas leaves something over
+    notes: list[Note] = field(default_factory=list)             # what a person must know about this storey, see `_judge`
+
+
+def _finding(name: str, f: Finding) -> str:
+    return (f"{name}: {f.length / 1000:.2f} m near ({f.x:.0f}, {f.y:.0f}), up to {f.worst:.0f} mm off"
+            + (f", in {f.where}" if f.where else ""))
 
 
 @dataclass
 class Report:
     storeys: list[Storey] = field(default_factory=list)
-    overlaps: list[str] = field(default_factory=list)
-    vertical: list[str] = field(default_factory=list)
-    ifc: list[str] = field(default_factory=list)
+    drawing: list[Note] = field(default_factory=list)       # what the reader noted in the drawings
+    overlaps: list[Note] = field(default_factory=list)
+    vertical: list[Note] = field(default_factory=list)
+    ifc: list[Note] = field(default_factory=list)
+
+    def notes(self) -> list[Note]:
+        """All that the reader noted and all that the checks found, as one list."""
+        return [*self.drawing, *(n for s in self.storeys for n in s.notes), *self.overlaps, *self.vertical, *self.ifc]
+
+    @property
+    def status(self) -> str:
+        """ "fail" when a check failed, "warn" when a person must look at something, else "pass"."""
+        found = {n.severity for n in self.notes()}
+        return "fail" if "fail" in found else "warn" if "warn" in found else "pass"
+
+    def result(self) -> list[str]:
+        """The result in a few lines: what failed, and how much there is to look at."""
+        notes = self.notes()
+        failed = [n.text for n in notes if n.severity == "fail"]
+        look = sum(n.severity == "warn" for n in notes)
+        review = f"{look} point{'' if look == 1 else 's'} to look at"
+        if failed:
+            return [f"Result: FAILED. {len(failed)} check{'' if len(failed) == 1 else 's'} failed"
+                    + (f", and there are {review}." if look else "."), *(f"    failed: {t}" for t in failed)]
+        return [f"Result: passed, with {review}." if look else "Result: passed."]
+
+    def data(self) -> dict:
+        """The report for a program: the status, the numbers of each storey and every note."""
+        notes = self.notes()
+        return {
+            "status": self.status,
+            "counts": {s: sum(n.severity == s for n in notes) for s in ("fail", "warn", "info")},
+            "storeys": [{"level": s.level, "cut_length_m": round(s.cut_length / 1000.0, 3),
+                         "cut_on_line": round(s.cut_on_line, 6), "drawn_length_m": round(s.drawn_length / 1000.0, 3),
+                         "drawn_explained": round(s.drawn_explained, 6),
+                         "areas_m2": {k: round(v / 1e6, 3) for k, v in s.areas.items()}} for s in self.storeys],
+            "notes": [{"check": n.check, "severity": n.severity, "level": n.level or None,
+                       "x": round(n.at[0], 1) if n.at else None, "y": round(n.at[1], 1) if n.at else None,
+                       "text": n.text} for n in notes],
+        }
 
     def text(self) -> str:
         out = ["Plan cut against the drawing", ""]
@@ -97,9 +143,7 @@ class Report:
                        f"strings, guards, a stair as another storey draws it) and {(off - in_stairs) / 1000:.1f} m elsewhere")
             for name, items in (("model face with no drawn line", s.cut_off), ("drawn line not in the model", s.drawn_off),
                                 ("drawn line inside a wall", s.buried)):
-                for f in items:
-                    out.append(f"    {name}: {f.length / 1000:.2f} m near ({f.x:.0f}, {f.y:.0f}), up to {f.worst:.0f} mm off"
-                               + (f", in {f.where}" if f.where else ""))
+                out += [f"    {_finding(name, f)}" for f in items]
         out += ["", "Balance of areas, in m2", ""]
         for s in self.storeys:
             a = {k: v / 1e6 for k, v in s.areas.items()}
@@ -108,11 +152,11 @@ class Report:
                        f"no room outline {a['floor']:.2f} + open to the storey below {a['open']:.2f} + nothing "
                        f"{a['nothing']:.2f}. Inside room outlines: {a['wall_in_room']:.2f} of wall and "
                        f"{a['opening_in_room']:.2f} of openings, which a room outline runs through")
-            out += [f"    {line}" for line in s.patches]
-        out += ["", "Solids that overlap", "", *(self.overlaps or ["none"])]
-        out += ["", "Up and down", "", *(self.vertical or ["nothing found"])]
+            out += [f"    {n.text}" for n in s.patches]
+        out += ["", "Solids that overlap", "", *([n.text for n in self.overlaps] or ["none"])]
+        out += ["", "Up and down", "", *([n.text for n in self.vertical] or ["nothing found"])]
         if self.ifc:
-            out += ["", "The IFC file, read back", "", *self.ifc]
+            out += ["", "The IFC file, read back", "", *(n.text for n in self.ifc)]
         return "\n".join(out) + "\n"
 
 
@@ -191,17 +235,21 @@ def cut_area(solids: list[Solid], key: str, z: float, categories: tuple[str, ...
     return unary_union(outer).difference(unary_union(holes))
 
 
-def _patches(name: str, plan: BaseGeometry) -> list[str]:
+def _patches(name: str, plan: BaseGeometry, severity: str) -> list[Note]:
     parts = sorted((g for g in getattr(plan, "geoms", [plan]) if g.geom_type == "Polygon" and g.area >= PATCH),
                    key=lambda g: -g.area)
-    out = [f"{name}: {g.area / 1e6:.2f} m2 near ({g.representative_point().x:.0f}, {g.representative_point().y:.0f})"
-           for g in parts[:MOST]]
+    out = []
+    for g in parts[:MOST]:
+        c = g.representative_point()
+        out.append(Note(f"{name}: {g.area / 1e6:.2f} m2 near ({c.x:.0f}, {c.y:.0f})", at=(c.x, c.y), severity=severity,
+                        check="areas"))
     if len(parts) > MOST:
-        out.append(f"{name}: {len(parts) - MOST} more patches, {sum(g.area for g in parts[MOST:]) / 1e6:.2f} m2 together")
+        out.append(Note(f"{name}: {len(parts) - MOST} more patches, {sum(g.area for g in parts[MOST:]) / 1e6:.2f} m2 together",
+                        severity=severity, check="areas"))
     return out
 
 
-def areas(level: Level, model: Model) -> tuple[dict[str, float], list[str]]:
+def areas(level: Level, model: Model) -> tuple[dict[str, float], list[Note]]:
     """Where the plan area inside the gross outline of a storey goes, and the patches that fit nowhere.
 
     The room outlines and the gross outline are the drafter's own, drawn for the area schedule. Wall that
@@ -224,8 +272,29 @@ def areas(level: Level, model: Model) -> tuple[dict[str, float], list[str]]:
     out = {"gross": gross.area, "rooms": rooms.area, "walls": solid.difference(rooms).area,
            "openings": openings.difference(rooms).area, "floor": floor.area, "open": void.area, "nothing": nothing.area,
            "wall_in_room": solid.intersection(rooms).area, "opening_in_room": openings.intersection(rooms).area}
-    return out, (_patches("floor with no room outline", floor) + _patches("neither room, wall nor floor", nothing)
-                 + _patches("wall inside a room outline", solid.intersection(rooms)))
+    return out, (_patches("floor with no room outline", floor, "info") + _patches("neither room, wall nor floor", nothing, "warn")
+                 + _patches("wall inside a room outline", solid.intersection(rooms), "warn"))
+
+
+def _judge(s: Storey, gates: Gates) -> list[Note]:
+    """What a person must know about a storey: every finding, and the gates that it does not pass."""
+    key = s.level
+    out = []
+    if s.cut_on_line < gates.on_line:
+        out.append(Note(f"storey {key}: {100 * s.cut_on_line:.2f} % of the model outline in the plan cut lies on a drawn "
+                        f"line; at least {100 * gates.on_line:.0f} % is wanted", key, None, "fail", "cut"))
+    for name, items, severity in (("model face with no drawn line", s.cut_off, "warn"),
+                                  ("drawn line not in the model", s.drawn_off, "warn"),
+                                  ("drawn line inside a wall", s.buried, "info")):
+        # where a stair stands, the drawing shows walking lines, strings and guards: none of them is in the model
+        out += [Note(f"storey {key}: {_finding(name, f)}", key, (f.x, f.y), "info" if f.where else severity, "cut")
+                for f in items]
+    share = s.areas["nothing"] / max(s.areas["gross"], 1.0)
+    if share > gates.unexplained:
+        out.append(Note(f"storey {key}: {s.areas['nothing'] / 1e6:.2f} m2 of the gross outline, {100 * share:.2f} %, is neither "
+                        f"room, wall, opening nor floor; at most {100 * gates.unexplained:.2f} % is allowed", key, None,
+                        "fail", "areas"))
+    return out + [replace(n, text=f"storey {key}: {n.text}", level=key) for n in s.patches]
 
 
 def storey(project: Project, level: Level, c: Classified, model: Model, solids: list[Solid], least: float = 150.0) -> Storey:
@@ -268,18 +337,20 @@ def storey(project: Project, level: Level, c: Classified, model: Model, solids: 
     for f in drawn_off:
         f.where = next((f"stair {name}" for name, plan in served if plan.contains(Point(f.x, f.y))), "")
     balance, patches = areas(level, model)
-    return Storey(key, float(w.sum()), float(w[d <= NEAR].sum() / max(w.sum(), 1.0)), cut_off,
-                  float(v.sum()), float(v[~off].sum() / max(v.sum(), 1.0)), float(v[symbol].sum()), float(v[buried].sum()),
-                  drawn_off, _findings(key, q, v, np.where(buried, e, 0.0), 4.0 * least)[:8], balance, patches)
+    s = Storey(key, float(w.sum()), float(w[d <= NEAR].sum() / max(w.sum(), 1.0)), cut_off,
+               float(v.sum()), float(v[~off].sum() / max(v.sum(), 1.0)), float(v[symbol].sum()), float(v[buried].sum()),
+               drawn_off, _findings(key, q, v, np.where(buried, e, 0.0), 4.0 * least)[:8], balance, patches)
+    s.notes = _judge(s, project.gates)
+    return s
 
 
-def overlaps(solids: list[Solid], least: float = 1e6) -> list[str]:
+def overlaps(solids: list[Solid], least: float = 1e6) -> list[Note]:
     """Pairs of solids that share more than `least` mm3. Solids of one kind on one storey are one solid already."""
     out = []
     for s in solids:
         if abs(s.volume_in - s.body.volume()) > least:
-            out.append(f"storey {s.level}, {s.category}/{s.material}: prisms overlap by "
-                       f"{(s.volume_in - s.body.volume()) / 1e9:.3f} m3")
+            out.append(Note(f"storey {s.level}, {s.category}/{s.material}: prisms overlap by "
+                            f"{(s.volume_in - s.body.volume()) / 1e9:.3f} m3", s.level, None, "fail", "overlap"))
     boxes = [s.body.bounding_box() for s in solids]
     for i, a in enumerate(solids):
         for j in range(i + 1, len(solids)):
@@ -288,20 +359,26 @@ def overlaps(solids: list[Solid], least: float = 1e6) -> list[str]:
                 continue
             shared = (a.body ^ b.body).volume()
             if shared > least:
-                out.append(f"{a.category}/{a.material} of storey {a.level} and {b.category}/{b.material} of storey {b.level} "
-                           f"share {shared / 1e9:.3f} m3")
+                out.append(Note(f"{a.category}/{a.material} of storey {a.level} and {b.category}/{b.material} of storey "
+                                f"{b.level} share {shared / 1e9:.3f} m3", a.level, None, "fail", "overlap"))
     return out
 
 
-def _stair(project: Project, model: Model, st: Stair, plates: dict[str, BaseGeometry]) -> str:
+def _stair(project: Project, model: Model, st: Stair, plates: dict[str, BaseGeometry]) -> list[Note]:
     """One stair as the model holds it: equal steps, each reached from the one under it, from floor to floor."""
     e0, e1 = project.level(st.level).elevation, project.top_of(st.level)
     rise = (e1 - e0) / st.risers
     line = f"stair {st.name} from {st.level}: {st.risers} risers of {rise:.0f} mm"
+    at = None if st.hole.is_empty else (st.hole.centroid.x, st.hole.centroid.y)
+    lo, hi = project.gates.riser
+    doubt = [] if lo <= rise <= hi else [Note(
+        f"stair {st.name} from {st.level}: a riser of {rise:.0f} mm is not usual ({lo:.0f} to {hi:.0f} mm). The height from "
+        f"{project.level(st.level).name} to the floor above, or the number of risers, is probably wrong", st.level, at,
+        "warn", "stair")]
     name = stair_name(project, st)
     found = next((e for e in model.elements if e.kind == "stair" and e.level == st.level and e.name == name), None)
     if found is None:
-        return f"{line}; NOT IN THE MODEL"
+        return [Note(f"{line}; NOT IN THE MODEL", st.level, at, "fail", "stair"), *doubt]
     walked = [p for p in found.pieces if p.material == "stair"]
     # the top of a piece is a step unless another piece of the stair stands on it
     steps: dict[float, list[Polygon]] = {}
@@ -330,13 +407,14 @@ def _stair(project: Project, model: Model, st: Stair, plates: dict[str, BaseGeom
     if want - have > 1e-3 * want:
         faults.append(f"{100 * (want - have) / want:.1f} % of it is cut away where it passes the floor above")
     if faults:
-        return f"{line}; FAULT: " + "; ".join(faults)
+        return [Note(f"{line}; FAULT: " + "; ".join(faults), st.level, at, "fail", "stair"), *doubt]
     reach = f", the top one meets the floor of {upper.name}" if upper else ""
-    return f"{line}; the model holds {len(tops)} steps, each touches the one under it{reach}"
+    return [Note(f"{line}; the model holds {len(tops)} steps, each touches the one under it{reach}", st.level, at, "info",
+                 "stair"), *doubt]
 
 
-def vertical(project: Project, levels: dict[str, Level], model: Model, stairs: list[Stair]) -> list[str]:
-    out = []
+def vertical(project: Project, levels: dict[str, Level], model: Model, stairs: list[Stair]) -> list[Note]:
+    out: list[Note] = []
     plates: dict[str, BaseGeometry] = {}
     covers: dict[str, BaseGeometry] = {}
     for spec in project.levels:
@@ -352,21 +430,26 @@ def vertical(project: Project, levels: dict[str, Level], model: Model, stairs: l
         roof = unary_union([p.poly for e in model.elements if e.level == key and e.kind == "roof" for p in e.pieces])
         cover = unary_union([roof, covers[above.key], model.open_floor(above.key)]) if above else roof
         for r in levels[key].rooms:
+            c = r.poly.representative_point()
             bare = r.poly.difference(plates[key]).difference(model.open_floor(key)).area
             if bare > 0.02e6 and bare > 0.01 * r.poly.area:
-                out.append(f"storey {key}, room {r.number} {r.name}: {bare / 1e6:.2f} m2 of it has no floor")
+                out.append(Note(f"storey {key}, room {r.number} {r.name}: {bare / 1e6:.2f} m2 of it has no floor", key,
+                                (c.x, c.y), "fail", "vertical"))
             open_sky = r.poly.difference(cover).area
             if open_sky > 0.02e6 and open_sky > 0.01 * r.poly.area:
-                out.append(f"storey {key}, room {r.number} {r.name}: {open_sky / 1e6:.2f} m2 of it has nothing over it")
+                out.append(Note(f"storey {key}, room {r.number} {r.name}: {open_sky / 1e6:.2f} m2 of it has nothing over it",
+                                key, (c.x, c.y), "fail", "vertical"))
     # every hole in a floor, with what the drawing gives as its reason and the rooms it takes floor from
     for spec in project.levels:
         for why, plan in model.holes.get(spec.key, []):
             taken = [f"{a / 1e6:.2f} m2 of " + (f"room {r.number} {r.name}".rstrip() if r.number or r.name
                                                 else "a room outline with no label")
                      for r in levels[spec.key].rooms if (a := r.poly.intersection(plan).area) > 0.02e6]
-            out.append(f"storey {spec.key}: the floor is open over {plan.area / 1e6:.2f} m2 for {why}"
-                       + (f"; that is {', '.join(taken)}" if taken else "; no room outline lies there"))
-    out += [_stair(project, model, st, plates) for st in stairs]
+            c = plan.representative_point()
+            out.append(Note(f"storey {spec.key}: the floor is open over {plan.area / 1e6:.2f} m2 for {why}"
+                            + (f"; that is {', '.join(taken)}" if taken else "; no room outline lies there"), spec.key,
+                            (c.x, c.y), "info", "vertical"))
+    out += [n for st in stairs for n in _stair(project, model, st, plates)]
     return out
 
 
@@ -427,12 +510,16 @@ def _profiles(f) -> tuple[dict[int, BaseGeometry], list[str]]:
     return plans, sorted(set(bad))
 
 
-def ifc(path: Path, project: Project, levels: dict[str, Level], model: Model, solids: list[Solid]) -> list[str]:
+def ifc(path: Path, project: Project, levels: dict[str, Level], model: Model, solids: list[Solid]) -> list[Note]:
     """Read the IFC file back with another geometry kernel and check it as the model was checked."""
     import ifcopenshell
     import ifcopenshell.geom
+    import ifcopenshell.validate
 
     from .ifc import CLASS
+
+    def note(text: str, severity: str = "info", level: str = "") -> Note:
+        return Note(text, level, None, severity, "ifc")
 
     f = ifcopenshell.open(str(path))
     key_of = {lv.name: lv.key for lv in project.levels}
@@ -465,29 +552,31 @@ def ifc(path: Path, project: Project, levels: dict[str, Level], model: Model, so
         k = (e.level, CLASS[e.kind][0])
         want[k] = want.get(k, 0.0) + sum(p.poly.area * (p.z1 - p.z0) for p in e.pieces)
         have[k] = have.get(k, 0) + (1 if e.pieces else 0)
-    out = []
+    out: list[Note] = []
     worst = 0.0
     for k in sorted(set(want) | set(volume)):
         a, b = want.get(k, 0.0), volume.get(k, 0.0)
         worst = max(worst, abs(a - b) / max(a, 1.0))
         if abs(a - b) > 1e-4 * max(a, 1e9) or have.get(k, 0) != count.get(k, 0):
-            out.append(f"storey {k[0]}, {k[1]}: the file holds {count.get(k, 0)} with {b / 1e9:.3f} m3, "
-                       f"the model {have.get(k, 0)} with {a / 1e9:.3f} m3")
-    out.insert(0, f"{sum(count.values())} elements read back; volume per storey and kind differs from the model "
-                  f"by at most {100 * worst:.4f} %")
+            out.append(note(f"storey {k[0]}, {k[1]}: the file holds {count.get(k, 0)} with {b / 1e9:.3f} m3, "
+                            f"the model {have.get(k, 0)} with {a / 1e9:.3f} m3", "fail", k[0]))
+    out.insert(0, note(f"{sum(count.values())} elements read back; volume per storey and kind differs from the model "
+                       f"by at most {100 * worst:.4f} %"))
     for spec in project.levels:
         joined = unary_union([g.buffer(0.02, join_style="mitre") for g in plans[spec.key]]).buffer(-0.02, join_style="mitre")
         own = cut_area(solids, spec.key, spec.elevation + CUT)
         p, w = _points(_segments([joined]))
         d = _distance(p, levels[spec.key].segs[:, :4])
-        out.append(f"storey {spec.key}: the cut of the file is {joined.area / 1e6:.3f} m2 of wall and column and differs "
-                   f"from the cut of the model by {joined.symmetric_difference(own).area / 1e6:.4f} m2; "
-                   f"{100 * w[d <= NEAR].sum() / max(w.sum(), 1.0):.2f} % of its outline is on a drawn line")
+        apart = joined.symmetric_difference(own).area
+        out.append(note(f"storey {spec.key}: the cut of the file is {joined.area / 1e6:.3f} m2 of wall and column and differs "
+                        f"from the cut of the model by {apart / 1e6:.4f} m2; "
+                        f"{100 * w[d <= NEAR].sum() / max(w.sum(), 1.0):.2f} % of its outline is on a drawn line",
+                        "fail" if apart > CUT_APART else "info", spec.key))
 
     # how the file relates its parts: outlines, holes in walls, and the doors and windows that fill them
     plan, bad = _profiles(f)
-    out.append("every extruded outline in the file is the outline of an area" if not bad else
-               f"{len(bad)} elements extrude an outline that crosses itself: {', '.join(bad[:6])}")
+    out.append(note("every extruded outline in the file is the outline of an area") if not bad else
+               note(f"{len(bad)} elements extrude an outline that crosses itself: {', '.join(bad[:6])}", "fail"))
     voids = {rel.RelatedOpeningElement.id() for rel in f.by_type("IfcRelVoidsElement")
              if rel.RelatingBuildingElement.is_a("IfcWall")}
     loose = [o.Name for o in f.by_type("IfcOpeningElement") if o.id() not in voids]
@@ -502,16 +591,24 @@ def ifc(path: Path, project: Project, levels: dict[str, Level], model: Model, so
             unhosted.append(el.Name)
         elif plan[el.id()].difference(plan[hole.id()].buffer(NEAR)).area > OUTSIDE * plan[el.id()].area:
             astray.append(el.Name)
-    out.append(f"{len(voids)} openings, each cuts a wall" + (f"; {len(loose)} cut nothing: {', '.join(loose[:6])}" if loose else ""))
-    out.append(f"{len(fillings)} doors and windows: {len(fillings) - len(unhosted) - len(astray)} fill an opening and lie in it"
-               + (f"; {len(unhosted)} fill no opening: {', '.join(unhosted[:6])}" if unhosted else "")
-               + (f"; {len(astray)} lie outside the opening they fill: {', '.join(astray[:6])}" if astray else ""))
+    out.append(note(f"{len(voids)} openings, each cuts a wall"
+                    + (f"; {len(loose)} cut nothing: {', '.join(loose[:6])}" if loose else ""), "fail" if loose else "info"))
+    # a screen that stands in no wall is a door with no opening to fill: to look at, not wrong
+    out.append(note(f"{len(fillings)} doors and windows: {len(fillings) - len(unhosted) - len(astray)} fill an opening and lie in it"
+                    + (f"; {len(unhosted)} fill no opening: {', '.join(unhosted[:6])}" if unhosted else "")
+                    + (f"; {len(astray)} lie outside the opening they fill: {', '.join(astray[:6])}" if astray else ""),
+                    "fail" if astray else "warn" if unhosted else "info"))
+    log = ifcopenshell.validate.json_logger()
+    ifcopenshell.validate.validate(f, log)
+    said = [str(s.get("message", s)).strip().splitlines()[0][:200] for s in log.statements]
+    out.append(note("the file agrees with the IFC4 schema") if not said else
+               note(f"the file breaks the IFC4 schema in {len(said)} places, the first: {said[0]}", "fail"))
     return out
 
 
 def run(project: Project, levels: dict[str, Level], cls: dict[str, Classified], model: Model, solids: list[Solid],
         stairs: list[Stair], ifc_file: Path | None = None) -> Report:
-    report = Report()
+    report = Report(drawing=list(model.notes))
     for spec in project.levels:
         report.storeys.append(storey(project, levels[spec.key], cls[spec.key], model, solids))
     report.overlaps = overlaps(solids)
