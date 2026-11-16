@@ -243,6 +243,17 @@ def _patches(name: str, plan: BaseGeometry, severity: str) -> list[Note]:
     return out
 
 
+def _areal(plan: BaseGeometry) -> BaseGeometry:
+    """The part of a plan that has area.
+
+    Where two outlines only touch, an intersection also gives the line or the point of the touch. GEOS
+    cannot take the difference of a geometry with such a mix in it.
+    """
+    if plan.geom_type in ("Polygon", "MultiPolygon"):
+        return plan
+    return unary_union([g for g in getattr(plan, "geoms", []) if g.geom_type in ("Polygon", "MultiPolygon")])
+
+
 def areas(level: Level, model: Model) -> tuple[dict[str, float], list[Note]]:
     """Where the plan area inside the gross outline of a storey goes, and the patches that fit nowhere.
 
@@ -252,16 +263,16 @@ def areas(level: Level, model: Model) -> tuple[dict[str, float], list[Note]]:
     """
     key, gross = level.key, level.gross_all
     own = [e for e in model.elements if e.level == key]
-    rooms = unary_union([r.poly for r in level.rooms]).intersection(gross)
+    rooms = _areal(unary_union([r.poly for r in level.rooms]).intersection(gross))
     # what stands from floor to ceiling, and the openings in it with their doors and windows
     solid = unary_union([q.poly for e in own if e.kind in ("wall", "column") and e.void is None for q in e.pieces])
-    solid = solid.intersection(gross)
+    solid = _areal(solid.intersection(gross))
     openings = unary_union([e.void.poly for e in own if e.void is not None]
                            + [q.poly for e in own if e.kind in ("door", "window") for q in e.pieces])
-    openings = openings.intersection(gross).difference(solid)
+    openings = _areal(openings.intersection(gross)).difference(solid)
     plate = unary_union([q.poly for e in own if e.kind == "slab" for q in e.pieces if q.material == "plate"])
-    floor = plate.intersection(gross).difference(unary_union([rooms, solid, openings]))
-    void = model.open_floor(key).intersection(gross).difference(unary_union([rooms, solid, openings, floor]))
+    floor = _areal(plate.intersection(gross)).difference(unary_union([rooms, solid, openings]))
+    void = _areal(model.open_floor(key).intersection(gross)).difference(unary_union([rooms, solid, openings, floor]))
     nothing = gross.difference(unary_union([rooms, solid, openings, floor, void]))
     out = {"gross": gross.area, "rooms": rooms.area, "walls": solid.difference(rooms).area,
            "openings": openings.difference(rooms).area, "floor": floor.area, "open": void.area, "nothing": nothing.area,

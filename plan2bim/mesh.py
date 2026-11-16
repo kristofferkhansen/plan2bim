@@ -9,6 +9,7 @@ from dataclasses import dataclass
 
 import manifold3d as m3
 import numpy as np
+import shapely
 from shapely.geometry import Polygon
 
 from .model import Element, Model, Piece
@@ -64,7 +65,14 @@ def section(body: m3.Manifold, z: float) -> list[Polygon]:
     for part in body.slice(z).decompose():
         rings = sorted((Polygon(ring) for ring in part.to_polygons() if len(ring) >= 3), key=lambda p: -p.area)
         if rings:
-            out.append(Polygon(rings[0].exterior, [hole.exterior for hole in rings[1:]]))
+            cut = Polygon(rings[0].exterior, [hole.exterior for hole in rings[1:]])
+            if cut.is_valid:
+                out.append(cut)
+            else:
+                # a ring of the cut can touch itself, for example where two walls meet at one point:
+                # GEOS takes no union or difference of such a polygon
+                valid = shapely.make_valid(cut)
+                out += [g for g in getattr(valid, "geoms", [valid]) if g.geom_type == "Polygon"]
     return out
 
 
