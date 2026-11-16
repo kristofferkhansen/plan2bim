@@ -5,6 +5,7 @@ import json
 import time
 from pathlib import Path
 
+import ezdxf
 import pytest
 from fastapi.testclient import TestClient
 
@@ -29,8 +30,10 @@ def client(tmp_path_factory):
         yield c
 
 
-def send(client, method: str, url: str, definition: dict, more: str = "", drawings: tuple[str, ...] = (), user=ANNA):
+def send(client, method: str, url: str, definition: dict, more: str = "", drawings: tuple[str, ...] = (), user=ANNA,
+         made: dict[str, bytes] | None = None):
     files = [("drawings", (name, (EXAMPLE / name).read_bytes())) for name in drawings]
+    files += [("drawings", item) for item in (made or {}).items()]
     # a part that is no file makes the request multipart also when it holds no drawing
     return client.request(method, url, headers={**user, **PAGE}, files=[*files, ("more", (None, more)),
                                                                          ("definition", (None, json.dumps(definition)))])
@@ -124,8 +127,27 @@ def test_a_drawing_that_cannot_be_used_is_reported_after_the_build(client):
     made = send(client, "POST", "/api/projects", other, "", ("level-1.dxf", "level-2.dxf"), user=BERIT)
     project = built(client, made.json()["id"], BERIT)
     assert project["state"] == "rejected"
-    assert any("No_such_layer" in p or "gross outline" in p for p in project["problems"])
+    assert any("level-1.dxf holds no gross outline on layer No_such_layer" in p for p in project["problems"])
     assert client.get(f"/api/projects/{project['id']}/files/ifc", headers=BERIT).status_code == 404
+    assert client.delete(f"/api/projects/{project['id']}", headers={**BERIT, **PAGE}).status_code == 204
+
+
+def test_drawings_of_one_storey_are_built_as_one(client, example, tmp_path):
+    """Storey 1 as two files: its outlines in one and its building lines in the other."""
+    parts = {}
+    for name, keep in (("areas.dxf", lambda layer: layer != "0"), ("plan.dxf", lambda layer: layer == "0")):
+        doc = ezdxf.readfile(EXAMPLE / "level-1.dxf")
+        for entity in [e for e in doc.modelspace() if not keep(e.dxf.layer)]:
+            doc.modelspace().delete_entity(entity)
+        doc.saveas(tmp_path / name)
+        parts[name] = (tmp_path / name).read_bytes()
+    two = {**DEFINITION, "level": [{**DEFINITION["level"][0], "drawing": list(parts)}, DEFINITION["level"][1]]}
+    made = send(client, "POST", "/api/projects", two, STAIR, ("level-2.dxf",), user=BERIT, made=parts)
+    assert made.status_code == 201, made.text
+    project = built(client, made.json()["id"], BERIT)
+    assert (project["state"], project["result"]["status"]) == ("done", "pass")
+    assert project["result"]["elements"] == example["result"]["elements"]
+    assert [d["name"] for d in project["drawings"]] == ["areas.dxf", "plan.dxf", "level-2.dxf"]
     assert client.delete(f"/api/projects/{project['id']}", headers={**BERIT, **PAGE}).status_code == 204
 
 

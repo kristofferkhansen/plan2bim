@@ -64,6 +64,7 @@ DEV_ID = "00000000-0000-0000-0000-000000000000"
 FORM = ("name", "reference", "heights", "input", "level")           # what the page sends as the definition
 MORE = ("stair", "review", "registration", "gates", "tolerances", "georeference", "author", "organization")
 MAX_DRAWING = 100 << 20         # bytes of one drawing
+MAX_DRAWINGS = 240             # drawings of one request
 MAX_REQUEST = 400 << 20         # bytes of one request
 MAX_LEVELS = 60
 STALE = 120.0                   # s; a build that this process does not know, and that is older, has stopped
@@ -99,6 +100,12 @@ def _stem(name: str) -> str:
     plain = unicodedata.normalize("NFKD", name.translate(str.maketrans(
         {"æ": "ae", "ø": "o", "å": "a", "Æ": "Ae", "Ø": "O", "Å": "A"}))).encode("ascii", "ignore").decode()
     return re.sub(r"[^A-Za-z0-9]+", "-", plain).strip("-")[:60] or "model"
+
+
+def _local(name: str) -> str:
+    """The name of a drawing as a file name on this machine: the name that the user gave it, made harmless."""
+    path = Path(re.sub(r"[\x00-\x1f/\\]", "_", name))
+    return f"{path.stem[:120] or 'drawing'}{path.suffix.lower()}"
 
 
 def _write(source: BinaryIO, target: Path, name: str) -> None:
@@ -162,8 +169,8 @@ class Service:
              uploads: dict[str, BinaryIO]) -> dict:
         """Take a definition and its drawings, check them, keep them, and start the build.
 
-        A level names its drawing by the name of an uploaded file or, in a project that exists, by the
-        name under which the service keeps a drawing of it. Raises Problems with all that is wrong.
+        A level names each of its drawings by the name of an uploaded file or, in a project that exists, by
+        the name under which the service keeps a drawing of it. Raises Problems with all that is wrong.
         """
         old = self.load(user.id, pid) if pid else None
         if old and old["state"] == "building":
@@ -192,27 +199,32 @@ class Service:
             (root / "drawings").mkdir()
             for lv in levels:
                 given = lv.get("drawing")
-                if not isinstance(given, str) or given in used:
-                    pass                                    # `parse` reports a drawing that is not a name
-                elif given in kept:
-                    used[given] = kept[given]
-                    (root / given).touch()                  # `parse` asks only whether the drawing is there
-                elif given in uploads:
-                    suffix = Path(given).suffix.lower()
-                    if suffix not in (".dwg", ".dxf"):
-                        problems.append(f"{given}: a drawing is a .dwg or a .dxf file")
-                        continue
-                    number = next(n for n in range(len(taken) + 1) if n not in taken)
-                    taken.add(number)
-                    used[given] = {"file": f"drawings/{number}{suffix}", "name": Path(given).name}
-                    try:
-                        _write(uploads[given], root / used[given]["file"], given)
-                    except Problems as e:
-                        problems += e.problems
-                else:
-                    problems.append(f'drawing "{given}" was not uploaded')
-                if given in used:
-                    lv["drawing"] = used[given]["file"]
+                names = [given] if isinstance(given, str) else given
+                if not isinstance(names, list) or not all(isinstance(name, str) for name in names):
+                    continue                                # `parse` reports a drawing that is not a name
+                for i, name in enumerate(names):
+                    if name in used:
+                        pass
+                    elif name in kept:
+                        used[name] = kept[name]
+                        (root / name).touch()               # `parse` asks only whether the drawing is there
+                    elif name in uploads:
+                        suffix = Path(name).suffix.lower()
+                        if suffix not in (".dwg", ".dxf"):
+                            problems.append(f"{name}: a drawing is a .dwg or a .dxf file")
+                            continue
+                        number = next(n for n in range(len(taken) + 1) if n not in taken)
+                        taken.add(number)
+                        used[name] = {"file": f"drawings/{number}{suffix}", "name": Path(name).name}
+                        try:
+                            _write(uploads[name], root / used[name]["file"], name)
+                        except Problems as e:
+                            problems += e.problems
+                    else:
+                        problems.append(f'drawing "{name}" was not uploaded')
+                    if name in used:
+                        names[i] = used[name]["file"]
+                lv["drawing"] = names if isinstance(given, list) else names[0]
             try:
                 project = parse({**definition, **tables}, root)
             except ProjectError as e:
@@ -280,10 +292,15 @@ class Service:
         base = self._files(owner, pid)
         with tempfile.TemporaryDirectory(prefix="plan2bim-") as tmp:
             root = Path(tmp)
+            # the build reads each drawing under the name that the user gave it: its messages and its report use it
+            local = {d["file"]: f"{Path(d['file']).with_suffix('')}/{_local(d['name'])}" for d in meta["drawings"]}
             for d in meta["drawings"]:
-                self.store.download(base + d["file"], root / d["file"])
+                self.store.download(base + d["file"], root / local[d["file"]])
+            definition = {**meta["definition"], **tomllib.loads(meta["more"])}
+            definition["level"] = [{**lv, "drawing": [local[name] for name in (
+                [lv["drawing"]] if isinstance(lv["drawing"], str) else lv["drawing"])]} for lv in definition["level"]]
             file = root / f"{meta['stem']}.json"
-            file.write_text(json.dumps({**meta["definition"], **tomllib.loads(meta["more"])}), encoding="utf-8")
+            file.write_text(json.dumps(definition), encoding="utf-8")
             out = root / "out"
             said = root / "said.txt"
             expired = threading.Event()
@@ -379,7 +396,7 @@ def create_app(store: Store, *, dev_user: str | None = None, build_timeout: floa
     async def taken(request: Request) -> tuple[object, str, dict[str, BinaryIO]]:
         if int(request.headers.get("content-length") or 0) > MAX_REQUEST:
             raise HTTPException(413, f"a request can have {MAX_REQUEST >> 20} MB at most")
-        form = await request.form(max_files=MAX_LEVELS, max_fields=4)
+        form = await request.form(max_files=MAX_DRAWINGS, max_fields=4)
         try:
             definition = json.loads(form.get("definition") or "")       # type: ignore[arg-type]
         except (TypeError, ValueError):

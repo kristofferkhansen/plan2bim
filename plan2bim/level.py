@@ -12,6 +12,7 @@ from shapely.geometry import LineString, Point, Polygon
 from shapely.ops import unary_union
 
 from . import source
+from .errors import InputError
 from .project import Project
 from .register import Block, block_index
 
@@ -120,23 +121,27 @@ def _ring_points(poly: source.Poly, t, circles: _Circles, grid: float) -> list[t
     return [(round(x / grid) * grid, round(y / grid) * grid) for x, y in out]
 
 
-def _clean_polygon(ring: list[tuple[float, float]]) -> tuple[Polygon | None, str]:
+def _polygons(g) -> list[Polygon]:
+    """The polygons of a geometry, also those of a collection in it."""
+    return [g] if g.geom_type == "Polygon" else [p for part in getattr(g, "geoms", ()) for p in _polygons(part)]
+
+
+def _clean_polygon(ring: list[tuple[float, float]]) -> tuple[list[Polygon], str]:
+    """The polygons that a ring encloses, the largest first, and why they are not the ring itself."""
     if len(ring) < 3:
-        return None, "fewer than 3 vertices"
+        return [], "fewer than 3 vertices"
     p = Polygon(ring)
     if p.is_valid and p.area > 0:
-        return p, ""
-    parts = [g for g in getattr(shapely.make_valid(p), "geoms", [shapely.make_valid(p)]) if g.geom_type == "Polygon"]
-    if not parts:
-        return None, "no area"
-    big = max(parts, key=lambda g: g.area)
-    return big, f"outline crosses itself; kept the largest part ({big.area / 1e6:.2f} of {sum(g.area for g in parts) / 1e6:.2f} m2)"
+        return [p], ""
+    parts = sorted((g for g in _polygons(shapely.make_valid(p)) if g.area > 0), key=lambda g: -g.area)
+    return parts, "outline touches or crosses itself" if parts else "no area"
 
 
 def build(project: Project, d: source.Drawing, blocks: list[Block]) -> Level:
     tol = project.tol
     grid = tol.grid
     notes: list[str] = list(d.notes)
+    notes += [f"block {b.id}: {b.evidence['doubt']}" for b in blocks if "doubt" in b.evidence]
 
     def t_of(x: float, y: float) -> tuple[tuple[float, float], int]:
         i = block_index(blocks, x, y)
@@ -186,33 +191,40 @@ def build(project: Project, d: source.Drawing, blocks: list[Block]) -> Level:
                 if len(pl.pts) >= 3:
                     notes.append(f"room-layer polyline {pl.handle} with {len(pl.pts)} vertices is open: used as a separator")
             continue
-        poly, why = _clean_polygon(ring)
-        if poly is None:
+        parts, why = _clean_polygon(ring)
+        if not parts:
             notes.append(f"room polyline {pl.handle} dropped: {why}")
             continue
+        poly = parts[0]
         dup = next((r for r in rooms if r.poly.symmetric_difference(poly).area < 1e-4 * poly.area), None)
         if dup is not None:
             dup.handles.append(pl.handle)
             notes.append(f"room polyline {pl.handle} is a duplicate of {dup.handles[0]}")
             continue
+        if why:
+            why += f"; kept the largest part ({poly.area / 1e6:.2f} of {sum(g.area for g in parts) / 1e6:.2f} m2)"
         r = Room(len(rooms), poly, "", "", "", [pl.handle], bi)
         if why:
             r.notes.append(why)
             notes.append(f"room polyline {pl.handle}: {why}")
         rooms.append(r)
     tree = shapely.STRtree([r.poly for r in rooms])
-    for lb in d.labels:
+    numbers: dict[int, list[str]] = {}
+    names: dict[int, list[str]] = {}
+    for lb in d.labels:                             # a label block has number and name; a plain text has one of them
         t, _ = t_of(lb.x, lb.y)
         pt = Point(lb.x + t[0], lb.y + t[1])
         hits = [int(i) for i in tree.query(pt, predicate="intersects")]
         if not hits:
-            notes.append(f"label {lb.number} {lb.name} lies in no room polygon")
+            notes.append(f"label {' '.join(filter(None, (lb.number, lb.name)))} lies in no room polygon")
             continue
         r = rooms[min(hits, key=lambda i: rooms[i].poly.area)]
-        r.number = f"{r.number}/{lb.number}" if r.number else lb.number
-        r.name = f"{r.name} / {lb.name}" if r.name and lb.name != r.name else lb.name
+        for said, known in ((lb.number, numbers), (lb.name, names)):
+            if said and said not in known.setdefault(r.id, []):
+                known[r.id].append(said)
         r.wing = r.wing or lb.wing
     for r in rooms:
+        r.number, r.name = "/".join(numbers.get(r.id, [])), " / ".join(names.get(r.id, []))
         if not r.number:
             notes.append(f"room polyline {r.handles[0]} has no label ({r.poly.area / 1e6:.2f} m2)")
         elif "/" in r.number:
@@ -245,14 +257,20 @@ def build(project: Project, d: source.Drawing, blocks: list[Block]) -> Level:
         out: list[tuple[int, Polygon]] = []
         for pl in polys:
             t, bi = t_of(pl.pts[0][0], pl.pts[0][1])
-            poly, why = _clean_polygon(snap(_ring_points(pl, t, circles, grid)))
-            if poly is None:
+            parts, why = _clean_polygon(snap(_ring_points(pl, t, circles, grid)))
+            if not parts:
                 notes.append(f"{what} outline {pl.handle} dropped: {why}")
                 continue
-            if why:
-                notes.append(f"{what} outline {pl.handle}: {why}")
-            out.append((bi, poly))
+            if why:                                 # one polyline round two buildings: each part is an outline
+                parts = [g for g in parts if g.area >= 1e6] or parts[:1]
+                notes.append(f"{what} outline {pl.handle}: {why}; read as {len(parts)} "
+                             f"outline{'' if len(parts) == 1 else 's'} of {', '.join(f'{g.area / 1e6:.2f}' for g in parts)} m2")
+            out += [(bi, g) for g in parts]
         return [p for _, p in sorted(out, key=lambda x: x[0])]
 
+    gross = outlines(d.gross, "gross")
+    if not gross:
+        raise InputError(f"storey {d.key}: no gross outline of the storey encloses an area. "
+                         + " ".join(n for n in notes if n.startswith("gross outline")))
     return Level(d.key, S, np.array(seg_arc), np.array(seg_dashed, dtype=bool), arc_list, rooms, separators,
-                 outlines(d.gross, "gross"), outlines(d.inner, "inner"), blocks, notes)
+                 gross, outlines(d.inner, "inner"), blocks, notes)

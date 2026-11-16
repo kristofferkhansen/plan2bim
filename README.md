@@ -1,6 +1,6 @@
 # plan2bim
 
-`plan2bim` builds a 3D model of a building from one 2D floor plan drawing (DWG or DXF) for each storey.
+`plan2bim` builds a 3D model of a building from the 2D floor plan drawings (DWG or DXF) of its storeys.
 It writes the model as an IFC4 file and as a viewer in one HTML file, and it checks the result.
 
 Nothing in plan is measured again or drawn again. A wall is the area that the drawn lines close.
@@ -40,7 +40,7 @@ not in the drawings. It is TOML or JSON. `example/example.toml` shows all fields
 uv run plan2bim serve --dev-user "$USER"        # http://127.0.0.1:8080, no sign-in, projects in ./plan2bim-data
 ```
 
-The page takes one drawing for each storey and the level of each floor. It builds the model, shows it and
+The page takes the drawings of each storey and the level of each floor. It builds the model, shows it and
 gives its IFC file. Without `--dev-user`, the service takes the user from the headers of the authentication
 that stands before it, and refuses a request that has none. Do not make the service reachable without such
 an authentication before it.
@@ -66,18 +66,22 @@ The exit status of `build` says how it went:
 
 ## Drawings that it reads
 
-One drawing for each storey. The defaults are those of area drawings for Norwegian facility management, in millimetres.
+One drawing for each storey, or several with the same coordinates: for example the area drawing and the plan
+that it shows as an external reference. The defaults are those of two conventions of area drawings for
+Norwegian facility management, in millimetres.
 
-| Layer | Content |
+| Content | Layers by default |
 |---|---|
-| `0` | All building lines: wall faces, door leaves and swing arcs, window lines, stair risers |
-| `Area_NTA` | One closed polyline for each room, and a block with the attributes `ROOMNUMBER` and `ROOMNAME` |
-| `Area_BTA` | The gross outline of each building block |
-| `Area_BRA` | The inner face of the exterior walls of each block |
+| Building lines: wall faces, door leaves and swing arcs, window lines, stair risers | Every layer that holds none of the contents below |
+| One closed polyline for each room, and a block with the attributes `ROOMNUMBER` and `ROOMNAME` | `Area_NTA`, `862 - Rom NTA` |
+| The gross outline of each building block | `Area_BTA`, `861 - Etasje BTA` |
+| The inner face of the exterior walls of each block | `Area_BRA` |
+| Room number and room name as plain texts | `F29-T1-Nr`, `F29-T2-Navn` |
 
-The `[input]` table of the project file names other layers, other attribute tags, another unit (`mm`, `cm`, `m`)
-and other room names for lifts and shafts. The rules that say what a drawn cell is are in
-`plan2bim/classify.py`. They are not in the project file.
+The `[input]` table of the project file names other layers (a name can hold `*`), layers that are not read,
+other attribute tags, another unit (`mm`, `cm`, `m`) and other room names for lifts and shafts.
+`docs/plan2bim.md` gives the keys. The rules that say what a drawn cell is are in `plan2bim/classify.py`.
+They are not in the project file.
 
 ## Tests
 

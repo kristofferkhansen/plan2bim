@@ -27,7 +27,7 @@ pytestmark = pytest.mark.skipif("PLAN2BIM_SAMPLES" not in os.environ, reason="PL
 def test_dwg_of_each_version_gives_the_same_lines(version, tmp_path):
     """One drawing, saved as each version of DWG. R14 has no layer name with a space in it."""
     dxf = source.to_dxf(SAMPLES / "libredwg" / f"example_{version}.dwg", tmp_path / "example.dxf")
-    d = source.read(version, dxf, Input(lines=("Tavolo 3", "TAVOLO_3"), gross=("Tavolo 2", "TAVOLO_2")))
+    d = source.read(version, {"example.dwg": dxf}, Input(lines=("Tavolo 3", "TAVOLO_3"), gross=("Tavolo 2", "TAVOLO_2")))
     xs = [x for poly in d.lines for x, _, _ in poly.pts]
     assert (len(d.lines), sum(len(poly.pts) for poly in d.lines), len(d.gross)) == (16, 3690, 4)
     assert (min(xs), max(xs)) == pytest.approx((-3088.15, 11211.63), abs=0.01)
@@ -37,8 +37,8 @@ def test_inspect_lists_the_layers_of_a_drawing_from_autocad(capsys):
     assert main(["inspect", str(HOUSE)]) == 0
     out = capsys.readouterr().out
     assert "unit: m" in out
-    assert re.search(r"^\s+Walls\s+LINE\s+211\s*$", out, re.MULTILINE)
-    assert re.search(r"^\s+Doors\s+INSERT\s+16\s*$", out, re.MULTILINE)
+    assert re.search(r"^\s+Walls\s+LINE\s+211\s+building lines$", out, re.MULTILINE)     # every layer is read by default
+    assert re.search(r"^\s+Doors\s+INSERT\s+16\s+building lines$", out, re.MULTILINE)
 
 
 def test_drawing_with_no_area_layers_is_refused_and_its_layers_are_named(write, capsys):

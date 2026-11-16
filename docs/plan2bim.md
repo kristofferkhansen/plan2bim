@@ -1,6 +1,6 @@
 # plan2bim: floor plan drawings to a 3D building model
 
-`plan2bim` builds a 3D model of a building from one 2D floor plan drawing for each storey.
+`plan2bim` builds a 3D model of a building from the 2D floor plan drawings of its storeys.
 This document gives the method, the assumptions, the checks and the tools.
 
 ## In short
@@ -41,28 +41,51 @@ the kinds of entity and the unit of a drawing.
 
 ## What the drawings must hold
 
-The defaults are those of area drawings for Norwegian facility management (AutoCAD 2018, millimetres).
+The reader needs building lines, room outlines and a gross outline, each on layers of its own. The defaults name
+the layers of two conventions of area drawings for Norwegian facility management (AutoCAD 2018, millimetres).
 
-| Layer | Content |
-|---|---|
-| `0` | All building lines: wall faces, door leaves and swing arcs, window lines, stair risers, lift and shaft crosses, fixtures. No wall is an object. A wall is two faces and the lines that close its ends. |
-| `Area_NTA` | One closed polyline for each room, and a block with room number and room name. |
-| `Area_BTA` | The gross outline of each building block. |
-| `Area_BRA` | The inner face of the exterior walls of each block. |
+| Content | Layers by default | What it is |
+|---|---|---|
+| Building lines | Every layer that holds none of the other contents | Wall faces, door leaves and swing arcs, window lines, stair risers, lift and shaft crosses, fixtures. No wall is an object. A wall is two faces and the lines that close its ends. |
+| Rooms | `Area_NTA`, `862 - Rom NTA` | One closed polyline for each room. A block with room number and room name can lie on the same layer. |
+| Gross outline | `Area_BTA`, `861 - Etasje BTA` | The gross outline of each building block. One polyline that runs round two blocks is read as two outlines. |
+| Inner outline | `Area_BRA` | The inner face of the exterior walls of each block. A drawing can be without it. |
+| Room number, room name | `F29-T1-Nr`, `F29-T2-Navn` | Plain texts in the rooms, where the rooms have no label block. |
+
+A storey can have more than one drawing: `drawing = ["03_areas.dwg", "03_plan.dwg"]`. Many drawing sets hold the
+outlines in an area drawing that shows the plan as an external reference, and the reader does not follow such
+a reference. The drawings of one storey are read as one drawing, so they must have the same coordinates.
+A drawing of which almost no line lies near the gross outline of the storey stops the run.
 
 The `[input]` table of the project file changes this convention:
 
 | Key | Meaning | Default |
 |---|---|---|
 | `unit` | Unit of the drawing coordinates: `mm`, `cm` or `m`. The model is always in mm. | `mm` |
-| `lines`, `rooms`, `gross`, `inner` | The layer, or a list of layers, for each content of the table above. | `0`, `Area_NTA`, `Area_BTA`, `Area_BRA` |
+| `lines`, `rooms`, `gross`, `inner` | The layer, or a list of layers, for each content of the table above. | `*`, and the layers of the table above |
+| `ignore` | Layers that are not read, for example furniture or dimensions. | none |
 | `room_number`, `room_name`, `room_wing` | Attribute tags of the room label block. | `ROOMNUMBER`, `ROOMNAME`, `WING` |
+| `room_number_text`, `room_name_text` | Layers with the room number and the room name as plain texts. | `F29-T1-Nr`, `F29-T2-Navn` |
 | `shafts` | Room names of lifts and shafts. Such a room has no floor where the storey below has one too. | `heis`, `sjakt` |
 | `cores` | Words in the names of rooms that run through all storeys. They are evidence for the registration. | `heis`, `trapp`, `sjakt` |
 
+A layer name is read without regard to capitals, and `*` in it stands for any text: `A2*` is every layer whose
+name starts with A2. Where a layer fits two contents, the first of these wins: `ignore`, `rooms`, `gross`,
+`inner`, `room_number_text`, `room_name_text`, `lines`. So `lines = "*"` is every layer that holds nothing else.
+
 The reader takes LWPOLYLINE, POLYLINE (2D), LINE, ARC and CIRCLE as building lines, and INSERT with attributes
-as room labels. Every other entity on a layer that the reader uses is counted and reported, for example a SPLINE
-or a block of building lines. Entities on other layers are not read and not reported.
+as room labels. Texts, dimensions and hatches are no building lines. Every other entity on a layer that the
+reader uses is counted and reported, for example a SPLINE or a block of building lines: the reader does not
+read the lines inside a block. Entities on other layers are not read and not reported.
+
+Not every line on a layer of building lines belongs to the building. The reader does not take:
+
+- a line that lies more than 10 m outside every gross outline, such as a frame, a title block or the site;
+- a straight line that runs through a gross outline from outside to outside, such as an axis line or a section
+  line, and every line of a layer on which most straight lines do so.
+
+The report counts these lines for each layer. Name a layer under `ignore` when more of it must go.
+
 A drawing with no building lines or no gross outline on the named layers stops the run. The message lists the
 layers that the drawing has. A drawing whose header gives another unit than the project file is reported.
 
@@ -97,7 +120,10 @@ Evidence for each translation, strongest first: arcs of curved walls with the sa
 same size that run through the storeys (lifts, stairs, shafts); line end points that coincide exactly.
 Drawings that were traced over each other share many end points. A translation is accepted only with
 at least 8 coincident end points. `out/NAME.txt` gives the evidence for each block.
-A block for which no translation is found stops the run. Its translation can be pinned in the project file.
+A block for which no translation is found is placed in doubt, and the report says so: with the translation that
+moves it least when several fit about equally well, else with another block of its drawing, else with the
+nearest block of another storey. Look at such a block in the viewer. Its translation can be pinned in the
+project file.
 
 ### Classification
 

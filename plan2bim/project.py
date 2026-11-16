@@ -24,7 +24,7 @@ KEY = re.compile(r"[A-Za-z0-9_.-]+")                # a storey key is part of fi
 class LevelSpec:
     key: str            # short id used in file names and reports
     name: str           # storey name written to the model
-    drawing: Path       # DWG or DXF
+    drawings: tuple[Path, ...]      # DWG or DXF: one drawing, or several that share their coordinates
     elevation: float    # top of structural floor, mm
 
 
@@ -69,18 +69,38 @@ class Tolerances:
 class Input:
     """The convention of the drawings: where the reader finds what.
 
-    The defaults are those of Norwegian area drawings for facility management.
+    The defaults take two conventions of Norwegian drawings for facility management: the area layers
+    `Area_NTA` and `Area_BTA` with a label block in each room, and the area layers `862 - Rom NTA` and
+    `861 - Etasje BTA` with the room number and the room name as plain texts.
+    A layer name can hold `*`, which stands for any text. A layer has one content: the first of `ignore`,
+    `rooms`, `gross`, `inner`, `room_number_text`, `room_name_text` and `lines` that names it.
     """
     unit: str = "mm"                                # unit of the drawing coordinates: mm, cm or m
-    lines: tuple[str, ...] = ("0",)                 # layers with the building lines
-    rooms: tuple[str, ...] = ("Area_NTA",)          # layers with the room outlines and the room labels
-    gross: tuple[str, ...] = ("Area_BTA",)          # layers with the gross outline of each building block
+    lines: tuple[str, ...] = ("*",)                 # layers with the building lines
+    rooms: tuple[str, ...] = ("Area_NTA", "862 - Rom NTA")     # layers with the room outlines and the room labels
+    gross: tuple[str, ...] = ("Area_BTA", "861 - Etasje BTA")  # layers with the gross outline of each building block
     inner: tuple[str, ...] = ("Area_BRA",)          # layers with the inner face of the exterior walls
+    ignore: tuple[str, ...] = ()                    # layers that are not read
     room_number: str = "ROOMNUMBER"                 # attribute tags of the room label block
     room_name: str = "ROOMNAME"
     room_wing: str = "WING"
+    room_number_text: tuple[str, ...] = ("F29-T1-Nr",)      # layers on which a text in a room outline is its number
+    room_name_text: tuple[str, ...] = ("F29-T2-Navn",)      # layers on which a text in a room outline is its name
     shafts: tuple[str, ...] = ("heis", "sjakt")             # room names of lifts and shafts: no floor in them
     cores: tuple[str, ...] = ("heis", "trapp", "sjakt")     # words in the names of rooms that run through all storeys
+
+
+LAYERS = ("ignore", "rooms", "gross", "inner", "room_number_text", "room_name_text", "lines")
+
+
+def content_of(inp: Input, layer: str) -> str:
+    """What the reader takes from `layer`: one of LAYERS, or "" when it does not read the layer."""
+    name = layer.casefold()
+    for content in LAYERS:
+        for pattern in getattr(inp, content):
+            if re.fullmatch(".*".join(re.escape(part) for part in pattern.casefold().split("*")), name):
+                return "" if content == "ignore" else content
+    return ""
 
 
 @dataclass(frozen=True)
@@ -228,13 +248,18 @@ def _levels(r: _Reader, top: dict, root: Path) -> list[LevelSpec]:
             r.problems.append(f"{where}: a key holds only letters, digits, '_', '.' and '-'")
         if key and any(lv.key == key for lv in out):
             r.problems.append(f"{where}: this key is used twice")
-        drawing = r.text(d, "drawing", where)
-        path = root / drawing
-        if drawing and path.suffix.lower() not in (".dwg", ".dxf"):
-            r.problems.append(f'{where}: drawing "{drawing}" must be a .dwg or a .dxf file')
-        elif drawing and not path.is_file():
-            r.problems.append(f"{where}: drawing {path} does not exist")
-        out.append(LevelSpec(key, r.text(d, "name", where, key), path, r.number(d, "elevation", where)))
+        drawings = r.names(d, "drawing", where, ())
+        if not drawings:
+            r.problems.append(f'{where}: "drawing" must name a drawing, or a list of drawings that share their coordinates')
+        if len(set(drawings)) < len(drawings):
+            r.problems.append(f"{where}: a drawing is named twice")
+        for drawing in drawings:
+            if Path(drawing).suffix.lower() not in (".dwg", ".dxf"):
+                r.problems.append(f'{where}: drawing "{drawing}" must be a .dwg or a .dxf file')
+            elif not (root / drawing).is_file():
+                r.problems.append(f"{where}: drawing {root / drawing} does not exist")
+        out.append(LevelSpec(key, r.text(d, "name", where, key), tuple(root / drawing for drawing in drawings),
+                             r.number(d, "elevation", where)))
     seen: dict[float, str] = {}
     for lv in out:
         if lv.elevation in seen:
@@ -324,7 +349,7 @@ def _input(r: _Reader, top: dict) -> Input:
     unit = r.text(d, "unit", "input", base.unit)
     if unit not in UNITS:
         r.problems.append(f'input: "unit" must be one of {", ".join(UNITS)}')
-    layers = {n: r.names(d, n, "input", getattr(base, n)) for n in ("lines", "rooms", "gross", "inner")}
+    layers = {n: r.names(d, n, "input", getattr(base, n)) for n in LAYERS}
     words = {n: tuple(x.lower() for x in r.names(d, n, "input", getattr(base, n))) for n in ("shafts", "cores")}
     return Input(unit=unit, **layers, **words, room_number=r.text(d, "room_number", "input", base.room_number),
                  room_name=r.text(d, "room_name", "input", base.room_name),

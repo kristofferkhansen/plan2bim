@@ -32,7 +32,7 @@ from ezdxf import bbox
 
 from . import __version__, source
 from .errors import InputError
-from .project import Input, load
+from .project import Input, content_of, load
 
 log = logging.getLogger("plan2bim")
 
@@ -83,24 +83,23 @@ def _check(args: argparse.Namespace) -> int:
 
 
 def _inspect(args: argparse.Namespace) -> int:
-    reads = {layer.casefold(): what for what, layers in (
-        ("building lines", Input().lines), ("rooms", Input().rooms), ("gross outline", Input().gross),
-        ("inner outline", Input().inner)) for layer in layers}
+    reads = {"lines": "building lines", "rooms": "rooms", "gross": "gross outline", "inner": "inner outline",
+             "room_number_text": "room numbers", "room_name_text": "room names", "": ""}
     with tempfile.TemporaryDirectory() as tmp:
         for i, name in enumerate(args.drawing):
             path = Path(name)
             if not path.is_file():
                 raise InputError(f"{path} does not exist")
-            doc = source.document(source.to_dxf(path, Path(tmp) / f"{i}.dxf"))
+            doc = source.document(source.to_dxf(path, Path(tmp) / f"{i}.dxf"), path.name)
             unit = source.INSUNITS.get(doc.header.get("$INSUNITS", 0))
             box = bbox.extents(doc.modelspace(), fast=True)
             print(f"{path}")
             print(f"  unit: {unit or 'not one of mm, cm, m, or not given'}")
             print(f"  extent: {box.size.x:.0f} x {box.size.y:.0f} drawing units" if box.has_data else "  extent: nothing drawn")
-            counts = Counter((e.dxf.layer, e.dxftype()) for e in doc.modelspace())
+            counts = Counter((source.plain(e.dxf.layer), e.dxftype()) for e in doc.modelspace())
             print(f"  {'layer':<28} {'entity':<12} {'count':>7}   read by default as")
             for (layer, kind), n in sorted(counts.items(), key=lambda item: (item[0][0].casefold(), -item[1])):
-                print(f"  {layer:<28} {kind:<12} {n:>7}   {reads.get(layer.casefold(), '')}")
+                print(f"  {layer:<28} {kind:<12} {n:>7}   {reads[content_of(Input(), layer)]}")
     return 0
 
 def _serve(args: argparse.Namespace) -> int:

@@ -34,13 +34,15 @@ th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--lin
 th { font-weight: 600; color: var(--muted); font-size: 13px; }
 tr.link { cursor: pointer; }
 tr.link:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
-input, select, textarea { font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--line);
+input, select, textarea { font: inherit; color: inherit; background: var(--card); border: 1px solid var(--muted);
                           border-radius: 5px; padding: 5px 8px; max-width: 100%; }
 td input[type=text] { width: 100%; }
 input.number, td input.number { width: 110px; }
 input.wrong { border-color: var(--fail); }
 .sheet { overflow-x: auto; }
 .sheet td input.name { min-width: 8em; }
+.sheet td.drawings div { white-space: nowrap; }
+label.more { color: var(--accent); cursor: pointer; font-size: 13px; }
 textarea { width: 100%; min-height: 150px; font-family: ui-monospace, monospace; font-size: 13px; }
 label.field { display: flex; flex-direction: column; gap: 3px; font-size: 13px; color: var(--muted); }
 label.field.wide { flex: 1 1 320px; }

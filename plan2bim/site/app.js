@@ -5,8 +5,10 @@ const main = document.getElementById("main");
 const HEIGHTS = [["plate", "Floor and roof plate"], ["door_head", "Door head"], ["window_sill", "Window sill"],
                  ["window_head", "Window head"], ["landing", "Stair landing"], ["balustrade", "Balustrade"]];
 const LAYERS = [["lines", "Building lines"], ["rooms", "Room outlines and labels"], ["gross", "Gross outline"],
-                ["inner", "Inner face of exterior walls"]];
+                ["inner", "Inner face of exterior walls"], ["ignore", "Layers that are not read"]];
 const TAGS = [["room_number", "Room number tag"], ["room_name", "Room name tag"], ["room_wing", "Wing tag"]];
+const TEXTS = [["room_number_text", "Layers with the room number as a text"],
+               ["room_name_text", "Layers with the room name as a text"]];
 const WORDS = [["shafts", "Room names of lifts and shafts"], ["cores", "Words in names of rooms through all storeys"]];
 const STATES = {building: "building", rejected: "cannot be built", error: "stopped"};
 const RESULTS = {pass: "passed", warn: "passed, with points to look at", fail: "a check failed"};
@@ -23,7 +25,8 @@ let timer = 0;
 const STOREY = 3000;        // mm: the height that the page gives to a storey, until the user gives the levels
 
 // The storey that the name of a drawing gives, or null: its place from the lowest, a short label, its name.
-// "1.etasje", "2 etg", "plan 3", "level 4", "U.etasje", "U1 etg", "plan U", "kjeller", "sokkeletasje".
+// "1.etasje", "2 etg", "plan 3", "level 4", "U.etasje", "U1 etg", "plan U", "kjeller", "sokkeletasje", and the
+// storey after the number of the building: "12345678_01", "12345678_U1_plan".
 function storeyOf(fileName) {
   const stem = fileName.replace(/\.[^.]+$/, "");
   const named = (match) => match[0].replace(/^[^a-z0-9]/i, "").trim();
@@ -39,6 +42,13 @@ function storeyOf(fileName) {
   if (above) {
     const number = Number(above[1] || above[2]);
     return {rank: number, key: String(number), name: named(above)};
+  }
+  const coded = /^\d{5,}_(?:(\d{1,2})|([uk])(\d?))(?:_|$)/i.exec(stem);
+  if (coded && coded[1]) return {rank: Number(coded[1]), key: String(Number(coded[1])), name: `Etasje ${coded[1]}`};
+  if (coded) {
+    const cellar = /k/i.test(coded[2]);
+    const key = (cellar ? "K" : "U") + coded[3];
+    return {rank: -(cellar ? 10 : 0) - Number(coded[3] || 1), key, name: `Etasje ${key}`};
   }
   return null;
 }
@@ -116,7 +126,7 @@ async function list() {
     el("div", {class: "title"}, el("h1", {}, "Projects"), el("a", {class: "button main", href: "#/new"}, "New project")),
     projects.length === 0
       ? el("div", {class: "card"}, el("p", {class: "lead"},
-          "Upload one floor plan drawing (DWG or DXF) for each storey of a building. The service builds a 3D model ",
+          "Upload the floor plan drawings (DWG or DXF) of each storey of a building. The service builds a 3D model ",
           "from them, shows it here, and gives you the model as an IFC file."))
       : el("div", {class: "card"}, el("table", {},
           el("tr", {}, el("th", {}, "Project"), el("th", {}, "Made"), el("th", {}, "Result")),
@@ -197,8 +207,9 @@ async function edit(id) {
   const names = p ? Object.fromEntries(p.drawings.map((drawing) => [drawing.file, drawing.name])) : {};
   // the place that the file name gives is kept for a stored drawing too: the form warns of levels that contradict it
   const rows = d.level.map((lv) => {
-    const label = names[lv.drawing] || lv.drawing;
-    return {...lv, label, file: null, rank: (storeyOf(label) || {rank: null}).rank, guess: false};
+    const drawings = [lv.drawing].flat().map((drawing) => ({drawing, label: names[drawing] || drawing, file: null}));
+    return {key: lv.key, name: lv.name, elevation: lv.elevation, drawings,
+      rank: (storeyOf(drawings[0].label) || {rank: null}).rank, guess: false};
   });
   let roofSet = Boolean(p);
   let levelsSet = Boolean(p);       // the user gave a level: the page puts no storey in another place any more
@@ -214,7 +225,7 @@ async function edit(id) {
   const text = (key) => el("input", {type: "text", value: [input[key] ?? defaults.input[key]].flat().join(", ")});
   const unit = el("select", {}, ["mm", "cm", "m"].map((u) => el("option", {value: u}, u)));
   unit.value = input.unit || defaults.input.unit;
-  const fields = Object.fromEntries([...LAYERS, ...TAGS, ...WORDS].map(([key]) => [key, text(key)]));
+  const fields = Object.fromEntries([...LAYERS, ...TAGS, ...TEXTS, ...WORDS].map(([key]) => [key, text(key)]));
   const more = el("textarea", {value: p ? p.more : MORE, spellcheck: false});
   const table = el("tbody", {});
   const sheet = el("div", {class: "sheet"});
@@ -239,25 +250,36 @@ async function edit(id) {
       row.height.textContent = height > 0 ? String(height) : "\u2014";
     }
     const twice = (values) => [...new Set(values.filter((value, i) => values.indexOf(value) !== i))];
-    const unplaced = rows.filter((row) => row.file && row.rank === null).map((row) => row.label);
+    const unplaced = rows.filter((row) => row.rank === null && row.drawings.some((one) => one.file))
+      .map((row) => row.drawings[0].label);
     const placed = rows.filter((row) => row.rank !== null && row.elevation !== null)
       .sort((a, b) => a.elevation - b.elevation);
     const wrong = placed.findIndex((row, i) => i > 0 && row.rank < placed[i - 1].rank);
     const top = levels[levels.length - 1];
     caution.replaceChildren(...[
       unplaced.length && `No storey in the file name of: ${unplaced.join(", ")}. Give the label and the floor level yourself.`,
-      wrong > 0 && `By the file names, ${placed[wrong].label} lies below ${placed[wrong - 1].label}, but its floor level `
+      wrong > 0 && `By the file names, ${placed[wrong].drawings[0].label} lies below ${placed[wrong - 1].drawings[0].label}, but its floor level `
         + "is higher. Check the floor levels.",
       twice(rows.map((row) => row.key)).map((key) => `Two storeys have the label \u201c${key}\u201d. Each needs its own.`),
       twice(levels).map((level) => `Two storeys have the floor level ${level}. Each needs its own.`),
       over !== null && top >= over && "The top of the roof must be above the highest floor level.",
     ].flat().filter(Boolean).map((line) => el("p", {}, line)));
   };
+  const drawn = (name) => rows.some((row) => row.drawings.some((item) => item.drawing === name));
+  const item = (file) => ({drawing: file.name, label: file.name, file});
   const draw = () => {
     table.replaceChildren(...rows.map((row) => {
       row.height = el("td", {class: "muted"});
       return el("tr", {},
-        el("td", {}, row.label),
+        el("td", {class: "drawings"},
+          row.drawings.map((one) => el("div", {}, one.label, " ", row.drawings.length > 1 && el("button", {type: "button",
+            class: "small", title: "Take this drawing out of the storey",
+            onclick: () => { row.drawings.splice(row.drawings.indexOf(one), 1); draw(); }}, "\u00d7"))),
+          el("label", {class: "more", title: "Another drawing of this storey, with the same coordinates"}, "+ drawing",
+            el("input", {type: "file", multiple: true, accept: ".dwg,.dxf", hidden: true, onchange: (e) => {
+              row.drawings.push(...[...e.target.files].filter((file) => !drawn(file.name)).map(item));
+              draw();
+            }}))),
         el("td", {}, el("input", {type: "text", value: row.key, size: 4, required: true, pattern: "[A-Za-z0-9_.\\-]+",
           title: "Letters, digits, \u2018.\u2019, \u2018_\u2019 or \u2018-\u2019",
           oninput: (e) => { row.key = e.target.value.trim(); row.guess = false; sync(); }})),
@@ -282,7 +304,7 @@ async function edit(id) {
   const place = () => {
     if (!levelsSet) {
       rows.sort((a, b) => (a.rank === null) - (b.rank === null) || a.rank - b.rank
-        || a.drawing.localeCompare(b.drawing, undefined, {numeric: true}));
+        || a.drawings[0].label.localeCompare(b.drawings[0].label, undefined, {numeric: true}));
       rows.forEach((row, i) => { row.elevation = i * STOREY; });
     }
     const renew = (row) => row.guess && (row.key === null || !levelsSet);
@@ -292,14 +314,19 @@ async function edit(id) {
   const add = (event) => {
     const picked = [...event.target.files].sort((a, b) => a.name.localeCompare(b.name, undefined, {numeric: true}));
     for (const file of picked) {
-      if (rows.some((row) => row.drawing === file.name)) continue;
+      if (drawn(file.name)) continue;
       const found = storeyOf(file.name);
+      const same = found && rows.find((row) => !row.guess && row.rank === found.rank && row.key === found.key);
+      if (same) {                 // the storey has this drawing too: an area drawing and its plan drawing
+        same.drawings.push(item(file));
+        continue;
+      }
       const top = rows.length ? Math.max(...rows.map((row) => Number(row.elevation))) + STOREY : 0;
       let key = found ? found.key : null;
       for (const row of rows) if (found && row.guess && row.key === key) row.key = null;   // the file name wins
       for (let n = 1; key !== null && rows.some((row) => row.key === key); n += 1) key = found.key + "abcdefghij"[n];
-      rows.push({key, name: found ? found.name : file.name.replace(/\.[^.]+$/, ""), drawing: file.name, elevation: top,
-        label: file.name, file, rank: found ? found.rank : null, guess: !found});
+      rows.push({key, name: found ? found.name : file.name.replace(/\.[^.]+$/, ""), drawings: [item(file)], elevation: top,
+        rank: found ? found.rank : null, guess: !found});
     }
     place();
     event.target.value = "";
@@ -312,14 +339,15 @@ async function edit(id) {
     const definition = {
       name: name.value.trim(), reference: chosen ? chosen.key : "",
       heights: {roof: number(roof), ...Object.fromEntries(HEIGHTS.map(([key]) => [key, number(heights[key])]))},
-      input: {unit: unit.value, ...Object.fromEntries([...LAYERS, ...WORDS].map(([key]) => [key, list(key)])),
+      input: {unit: unit.value, ...Object.fromEntries([...LAYERS, ...TEXTS, ...WORDS].map(([key]) => [key, list(key)])),
         ...Object.fromEntries(TAGS.map(([key]) => [key, fields[key].value.trim()]))},
-      level: rows.map((row) => ({key: row.key, name: row.name, drawing: row.drawing, elevation: row.elevation})),
+      level: rows.map((row) => ({key: row.key, name: row.name, drawing: row.drawings.map((one) => one.drawing),
+        elevation: row.elevation})),
     };
     const form = new FormData();
     form.append("definition", JSON.stringify(definition));
     form.append("more", more.value);
-    for (const row of rows) if (row.file) form.append("drawings", row.file, row.file.name);
+    for (const row of rows) for (const one of row.drawings) if (one.file) form.append("drawings", one.file, one.file.name);
     send.disabled = true;
     send.textContent = "Sending the drawings";
     try {
@@ -334,11 +362,14 @@ async function edit(id) {
   const field = (label, box, wide) => el("label", {class: wide ? "field wide" : "field"}, label, box);
 
   sheet.append(
-    el("table", {}, el("thead", {}, el("tr", {}, el("th", {}, "Drawing"), el("th", {}, "Storey"),
+    el("table", {}, el("thead", {}, el("tr", {}, el("th", {}, "Drawings"), el("th", {}, "Storey"),
       el("th", {}, "Name in the model"), el("th", {}, "Floor level, mm"), el("th", {}, "Height to the floor above, mm"),
       el("th", {}))), table),
     caution,
     el("ul", {class: "help"},
+      el("li", {}, el("b", {}, "Drawings: "), "the drawings of one storey are read as one drawing, so they must have the ",
+        "same coordinates. \u201c+ drawing\u201d adds a file to a storey. Take out a drawing that shows the same storey ",
+        "in another way, for example a detailed plan beside the plan for facility management."),
       el("li", {}, el("b", {}, "Storey: "), "a short label, for example K, U, 1 or 2, different for each storey. Use only ",
         "letters, digits, \u2018.\u2019, \u2018_\u2019 and \u2018-\u2019. The report and the names of the output files use it."),
       el("li", {}, el("b", {}, "Name in the model: "), "the name of the storey in the 3D model and in the IFC file."),
@@ -353,11 +384,13 @@ async function edit(id) {
     el("div", {class: "title"}, el("h1", {}, p ? `Edit ${p.name}` : "New project")),
     el("div", {class: "card"},
       el("div", {class: "row"}, field("Name of the building", name, true)),
-      el("h2", {}, "Drawings: one for each storey"),
-      el("p", {class: "muted"}, "Select one DWG or DXF file for each storey. The page reads the storey from the name ",
-        "of the file, for example \u201c1.etasje\u201d, \u201cU.etasje\u201d or \u201cplan 2\u201d, and lists the storeys from the lowest ",
-        "to the highest. A drawing does not say which storey it is or how high it lies: check the labels and the floor ",
-        "levels before you build."),
+      el("h2", {}, "Drawings of each storey"),
+      el("p", {class: "muted"}, "Select the DWG or DXF files of the storeys. A storey has one drawing, or two when ",
+        "the outlines of the rooms and of the storey are in an area drawing of their own: then give the area drawing ",
+        "and the plan drawing with the walls. The page reads the storey from the name of the file, for example ",
+        "\u201c1.etasje\u201d, \u201cU.etasje\u201d, \u201cplan 2\u201d or \u201c12345678_01\u201d, puts the files of one storey together and ",
+        "lists the storeys from the lowest to the highest. A drawing does not say which storey it is or how high it ",
+        "lies: check the labels and the floor levels before you build."),
       el("p", {}, el("input", {type: "file", multiple: true, accept: ".dwg,.dxf", onchange: add}),
         el("span", {class: "muted"}, ` DWG or DXF, ${defaults.max_drawing_mb} MB each at most.`)),
       el("div", {}, sheet),
@@ -367,10 +400,14 @@ async function edit(id) {
       el("details", {}, el("summary", {}, "Assumed heights, mm"),
         el("div", {class: "row"}, HEIGHTS.map(([key, label]) => field(label, heights[key])))),
       el("details", {}, el("summary", {}, "Layers and unit of the drawings"),
-        el("p", {class: "muted"}, "The defaults are those of Norwegian area drawings for facility management. ",
-          "Give several layers with a comma between them."),
+        el("p", {class: "muted"}, "Give several layers with a comma between them. A \u201c*\u201d stands for any text: ",
+          "\u201cA2*\u201d is every layer whose name starts with A2, and \u201c*\u201d alone is every layer that no other box ",
+          "names. The defaults read two conventions of Norwegian drawings for facility management: room and gross ",
+          "outlines on Area_NTA and Area_BTA with a label block in each room, or on \u201c862 - Rom NTA\u201d and ",
+          "\u201c861 - Etasje BTA\u201d with the room number and name as texts."),
         el("div", {class: "row"}, field("Unit", unit), LAYERS.map(([key, label]) => field(label, fields[key]))),
-        el("div", {class: "row"}, TAGS.map(([key, label]) => field(label, fields[key]))),
+        el("div", {class: "row"}, TAGS.map(([key, label]) => field(label, fields[key])),
+          TEXTS.map(([key, label]) => field(label, fields[key]))),
         el("div", {class: "row"}, WORDS.map(([key, label]) => field(label, fields[key], true)))),
       el("details", {}, el("summary", {}, "More settings: stairs, review decisions, gates, map position"), more)),
     errors,

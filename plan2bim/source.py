@@ -1,16 +1,24 @@
-"""Read one storey's drawing into plain geometry. No interpretation happens here.
+"""Read the drawings of one storey into plain geometry.
 
-The project file says where the reader finds what (`project.Input`). The defaults are those of area
-drawings for Norwegian facility management:
+The project file says where the reader finds what (`project.Input`). The defaults take two conventions
+of Norwegian drawings for facility management:
 
-- layer ``0``           all building linework
-- layer ``Area_NTA``    one closed polyline per room, plus a block reference
-                        with attributes ROOMNUMBER / ROOMNAME (/ WING)
-- layer ``Area_BTA``    gross outline of each separate building block
-- layer ``Area_BRA``    inner face of the exterior walls of each block
+- layer ``Area_NTA`` or ``862 - Rom NTA``       one closed polyline per room. A room has its number and its
+                                                name in a block reference on that layer, with the attributes
+                                                ROOMNUMBER / ROOMNAME (/ WING), or in a plain text on the
+                                                layers ``F29-T1-Nr`` and ``F29-T2-Navn``.
+- layer ``Area_BTA`` or ``861 - Etasje BTA``    gross outline of each separate building block
+- layer ``Area_BRA``                            inner face of the exterior walls of each block
+- every other layer                             building linework
+
+A storey can have several drawings that share their coordinates, for example an area drawing with the
+outlines and the plan drawing that it references. They are read as one drawing.
 
 Building lines are read from LWPOLYLINE, POLYLINE (2D), LINE, ARC and CIRCLE. All of them become
-polylines with bulges. What else lies on a layer that the reader uses is counted and reported.
+polylines with bulges. What else lies on a layer that the reader uses is counted and reported, apart from
+texts and dimensions among the building lines. The only interpretation here: a building line far outside
+every gross outline, or straight through a gross outline from outside to outside, is not read
+(`_building_lines`).
 """
 from __future__ import annotations
 
@@ -24,11 +32,21 @@ from pathlib import Path
 
 import ezdxf
 import numpy as np
+import shapely
+from ezdxf.lldxf.encoding import decode_dxf_unicode, has_dxf_unicode
+from shapely.geometry import LineString, Polygon
+from shapely.ops import unary_union
 
 from .errors import InputError
-from .project import UNITS, Input
+from .project import UNITS, Input, content_of
 
 INSUNITS = {4: "mm", 5: "cm", 6: "m"}       # $INSUNITS of the DXF header, for the units this reader takes
+ANNOTATION = frozenset({"TEXT", "MTEXT", "ATTDEF", "DIMENSION", "LEADER", "MULTILEADER", "TOLERANCE"})
+FAR = 10_000.0          # mm; a line this far outside every gross outline is a frame, a legend or the site
+THROUGH = 1_000.0       # mm; a straight line that ends this far outside on both sides runs through the building
+AXES = 3                # lines through the building that make a layer of which they are most a layer of axes
+ELSEWHERE = 0.05        # share of the lines of a drawing near the gross outline, under which it has other coordinates
+LISTED = 30             # layers that a message names
 
 
 @dataclass
@@ -56,10 +74,12 @@ class Poly:
     closed: bool
     handle: str
     linetype: str = "BYLAYER"
+    layer: str = ""
 
 
 @dataclass
 class Label:
+    """What a room is called: a label block with attributes, or a plain text with the number or the name."""
     x: float
     y: float
     number: str
@@ -107,65 +127,157 @@ def to_dxf(drawing: Path, cache: Path) -> Path:
     return cache
 
 
-def document(dxf: Path):
+def document(dxf: Path, name: str = ""):
     """The DXF document, with a message for a person when it cannot be read."""
     try:
         return ezdxf.readfile(dxf)
     except (OSError, ezdxf.DXFError) as e:
-        raise InputError(f"{dxf.name} cannot be read as DXF: {e}") from e
+        raise InputError(f"{name or dxf.name} cannot be read as DXF: {e}") from e
 
 
-def read(key: str, dxf: Path, inp: Input) -> Drawing:
-    doc = document(dxf)
+def plain(text: str) -> str:
+    """A name or a text of a DXF, with each `\\U+XXXX` of an older DXF as the character it stands for."""
+    return decode_dxf_unicode(text) if has_dxf_unicode(text) else text
+
+
+def _and(names: list[str]) -> str:
+    return names[0] if len(names) == 1 else f'{", ".join(names[:-1])} and {names[-1]}'
+
+
+def read(key: str, files: dict[str, Path], inp: Input) -> Drawing:
+    """The drawings of one storey as one drawing. `files` gives the DXF of each drawing by the name that
+    a message uses for it."""
     k = UNITS[inp.unit]
     d = Drawing(key)
-    said = INSUNITS.get(doc.header.get("$INSUNITS", 0))
-    if said and said != inp.unit:
-        d.notes.append(f"the drawing says that its unit is {said}; it is read in {inp.unit}, as the project file says")
-    buckets = {layer.casefold(): bucket
-               for bucket, layers in ((d.lines, inp.lines), (d.rooms, inp.rooms), (d.gross, inp.gross), (d.inner, inp.inner))
-               for layer in layers}
+    several = len(files) > 1
+    buckets = {"lines": d.lines, "rooms": d.rooms, "gross": d.gross, "inner": d.inner}
     number, name, wing = inp.room_number.upper(), inp.room_name.upper(), inp.room_wing.upper()
     unread: Counter[tuple[str, str]] = Counter()     # on a layer that the reader uses, of a kind it does not read
     layers: Counter[str] = Counter()
-    for e in doc.modelspace():
-        t, layer = e.dxftype(), e.dxf.layer
-        layers[layer] += 1
-        bucket = buckets.get(layer.casefold())
-        if bucket is None:
-            continue
-        linetype = e.dxf.get("linetype", "BYLAYER")
-        if t == "LWPOLYLINE":
-            bucket.append(Poly([(x * k, y * k, b) for x, y, b in e.get_points("xyb")], bool(e.closed), e.dxf.handle, linetype))
-        elif t == "POLYLINE" and e.is_2d_polyline:
-            pts = [(v.dxf.location.x * k, v.dxf.location.y * k, v.dxf.get("bulge", 0.0)) for v in e.vertices]
-            bucket.append(Poly(pts, bool(e.is_closed), e.dxf.handle, linetype))
-        elif t == "LINE" and (bucket is d.lines or bucket is d.rooms):
-            bucket.append(Poly([(e.dxf.start.x * k, e.dxf.start.y * k, 0.0), (e.dxf.end.x * k, e.dxf.end.y * k, 0.0)],
-                               False, e.dxf.handle, linetype))
-        elif t == "ARC" and bucket is d.lines:
-            sweep = math.radians(e.dxf.end_angle - e.dxf.start_angle) % math.tau or math.tau
-            bulge = math.tan(sweep / 4.0) * (-1.0 if e.dxf.extrusion.z < 0 else 1.0)    # a mirrored arc turns the other way
-            p, q = e.start_point, e.end_point
-            bucket.append(Poly([(p.x * k, p.y * k, bulge), (q.x * k, q.y * k, 0.0)], False, e.dxf.handle, linetype))
-        elif t == "CIRCLE" and bucket is d.lines:
-            c, r = e.ocs().to_wcs(e.dxf.center), e.dxf.radius
-            bucket.append(Poly([((c.x - r) * k, c.y * k, 1.0), ((c.x + r) * k, c.y * k, 1.0)], True, e.dxf.handle, linetype))
-        elif t == "INSERT" and bucket is d.rooms:
-            a = {x.dxf.tag.upper(): (x.dxf.text or "").strip() for x in e.attribs}
-            d.labels.append(Label(e.dxf.insert.x * k, e.dxf.insert.y * k, a.get(number, ""), a.get(name, ""),
-                                  a.get(wing, ""), e.dxf.handle))
-        else:
-            unread[(t, layer)] += 1
-    for what, bucket, wanted in (("building lines", d.lines, inp.lines), ("gross outline", d.gross, inp.gross)):
-        if not bucket:
-            found = ", ".join(f"{layer} ({n})" for layer, n in layers.most_common(12)) or "none"
-            raise InputError(f'storey {key}: {dxf.name} holds no {what} on layer {" or ".join(wanted)}. Its layers, with '
-                             f"the number of entities on each: {found}. Name the layers in [input] of the project file.")
+    references: list[str] = []                       # drawings that these drawings reference
+    lines_of: dict[str, range] = {}                  # the building lines of each drawing, as indexes of d.lines
+    for file, dxf in files.items():
+        doc = document(dxf, file)
+        said = INSUNITS.get(doc.header.get("$INSUNITS", 0))
+        if said and said != inp.unit:
+            d.notes.append(f"{file if several else 'the drawing'} says that its unit is {said}; it is read in {inp.unit}, "
+                           "as the project file says")
+        references += [plain(block.name) for block in doc.blocks if block.block is not None and block.block.is_xref]
+        content: dict[str, str] = {}
+        first = len(d.lines)
+        for e in doc.modelspace():
+            t, layer = e.dxftype(), plain(e.dxf.layer)
+            layers[layer] += 1
+            if layer not in content:
+                content[layer] = content_of(inp, layer)
+            what = content[layer]
+            if not what:
+                continue
+            handle = f"{file}:{e.dxf.handle}" if several else e.dxf.handle
+            if what in ("room_number_text", "room_name_text"):
+                if t in ("TEXT", "MTEXT"):
+                    at = e.get_placement()[1] if t == "TEXT" else e.dxf.insert
+                    text = " ".join(plain(e.plain_text()).split())
+                    is_number = what == "room_number_text"
+                    d.labels.append(Label(at.x * k, at.y * k, text if is_number else "", "" if is_number else text, "", handle))
+                else:
+                    unread[(t, layer)] += 1
+                continue
+            bucket = buckets[what]
+            linetype = e.dxf.get("linetype", "BYLAYER")
+            if t == "LWPOLYLINE":
+                bucket.append(Poly([(x * k, y * k, b) for x, y, b in e.get_points("xyb")], bool(e.closed), handle, linetype,
+                                   layer))
+            elif t == "POLYLINE" and e.is_2d_polyline:
+                pts = [(v.dxf.location.x * k, v.dxf.location.y * k, v.dxf.get("bulge", 0.0)) for v in e.vertices]
+                bucket.append(Poly(pts, bool(e.is_closed), handle, linetype, layer))
+            elif t == "LINE" and (bucket is d.lines or bucket is d.rooms):
+                bucket.append(Poly([(e.dxf.start.x * k, e.dxf.start.y * k, 0.0), (e.dxf.end.x * k, e.dxf.end.y * k, 0.0)],
+                                   False, handle, linetype, layer))
+            elif t == "ARC" and bucket is d.lines:
+                sweep = math.radians(e.dxf.end_angle - e.dxf.start_angle) % math.tau or math.tau
+                bulge = math.tan(sweep / 4.0) * (-1.0 if e.dxf.extrusion.z < 0 else 1.0)    # a mirrored arc turns the other way
+                p, q = e.start_point, e.end_point
+                bucket.append(Poly([(p.x * k, p.y * k, bulge), (q.x * k, q.y * k, 0.0)], False, handle, linetype, layer))
+            elif t == "CIRCLE" and bucket is d.lines:
+                c, r = e.ocs().to_wcs(e.dxf.center), e.dxf.radius
+                bucket.append(Poly([((c.x - r) * k, c.y * k, 1.0), ((c.x + r) * k, c.y * k, 1.0)], True, handle, linetype,
+                                   layer))
+            elif t == "INSERT" and bucket is d.rooms:
+                a = {x.dxf.tag.upper(): plain(x.dxf.text or "").strip() for x in e.attribs}
+                d.labels.append(Label(e.dxf.insert.x * k, e.dxf.insert.y * k, a.get(number, ""), a.get(name, ""),
+                                      a.get(wing, ""), handle))
+            elif not (bucket is d.lines and t in ANNOTATION):
+                unread[(t, layer)] += 1
+        lines_of[file] = range(first, len(d.lines))
+
+    names = _and(list(files))
+    found = ", ".join(f"{layer} ({n})" for layer, n in layers.most_common(LISTED)) or "none"
+    if len(layers) > LISTED:
+        found += f", and {len(layers) - LISTED} more"
+    where = (f"{'Their' if several else 'Its'} layers, with the number of entities on each: {found}. Name the layers "
+             'under "Layers and unit of the drawings" on the web page, or in [input] of the project file.')
+    if not d.gross:
+        raise InputError(f'storey {key}: {names} {"hold" if several else "holds"} no gross outline on layer '
+                         f'{" or ".join(inp.gross)}. {where} If the outlines are in a drawing of their own, give the '
+                         "storey that drawing too.")
+    drawn = len(d.lines)
+    _building_lines(key, d, lines_of)
+    if not d.lines:
+        if drawn:
+            raise InputError(f"storey {key}: all {drawn} building lines of {names} lie more than {FAR / 1000:.0f} m from "
+                             "the gross outline. The building lines and the gross outline must have the same coordinates.")
+        others = (f" {names} {'reference' if several else 'references'} {_and(sorted(set(references)))}."
+                  if references else "")
+        raise InputError(f'storey {key}: {names} {"hold" if several else "holds"} no building lines on layer '
+                         f'{" or ".join(inp.lines)}. {where} If the walls are in a drawing of their own, give the storey '
+                         f"that drawing too.{others}")
     if unread:
         kinds = ", ".join(f"{n} {t} on layer {layer}" for (t, layer), n in unread.most_common())
         d.notes.append(f"not read, because the reader does not take this kind of entity on that layer: {kinds}")
     return d
+
+
+def _building_lines(key: str, d: Drawing, lines_of: dict[str, range]) -> None:
+    """Take out of `d.lines` what is not a line of the building, and note it.
+
+    A frame, a legend and the site lie far outside every gross outline. An axis line or a section line is
+    straight and runs through a gross outline from outside to outside. Where most straight lines of a layer
+    do so, the layer holds the axis grid, and its other lines and its circles belong to that grid too.
+    Each of them is the same in the drawing of every storey, so it would also be false evidence for the
+    registration.
+    A drawing of which almost no line is near the gross outline has other coordinates: it stops the run.
+    """
+    rings = [Polygon([(x, y) for x, y, _ in g.pts]) for g in d.gross if len(g.pts) >= 3]
+    gross = unary_union([p if p.is_valid else p.buffer(0) for p in rings])
+    if gross.is_empty or not d.lines:
+        return
+    paths = np.array([LineString([(x, y) for x, y, _ in (*pl.pts, *(pl.pts[:1] if pl.closed else ()))])
+                      if len(pl.pts) > 1 else LineString() for pl in d.lines])
+    far = ~shapely.intersects(gross.buffer(FAR), paths)
+    straight = np.array([len(pl.pts) == 2 and not pl.closed and abs(pl.pts[0][2]) < 1e-9 for pl in d.lines])
+    beside = gross.buffer(THROUGH)
+    ends = shapely.points([[pl.pts[0][:2], pl.pts[-1][:2]] if pl.pts else [(0.0, 0.0)] * 2 for pl in d.lines])
+    through = (straight & ~far & ~shapely.intersects(beside, ends[:, 0]) & ~shapely.intersects(beside, ends[:, 1])
+               & shapely.intersects(gross, paths))
+    layer = np.array([pl.layer for pl in d.lines])
+    for name in set(layer[through]):
+        on = (layer == name) & ~far
+        if through[on].sum() >= AXES and 2 * through[on].sum() > (straight & on).sum():
+            through |= on
+    for file, own in lines_of.items():
+        if len(lines_of) > 1 and len(own) >= 20 and (~far[own.start:own.stop]).mean() < ELSEWHERE:
+            raise InputError(f"storey {key}: {file} does not lie on the gross outline of the storey: "
+                             f"{far[own.start:own.stop].sum()} of its {len(own)} lines are more than {FAR / 1000:.0f} m "
+                             "from it. The drawings of one storey must have the same coordinates. Take the drawing out "
+                             "of the storey.")
+    axes = "they run straight through the building as axis lines do, or lie on a layer of such lines"
+    for which, why in ((far, f"they lie more than {FAR / 1000:.0f} m outside the gross outline"), (through, axes)):
+        if which.any():
+            layers = Counter(pl.layer for pl, out in zip(d.lines, which, strict=True) if out)
+            d.notes.append(f"{which.sum()} lines not read, because {why}: "
+                           + ", ".join(f"{n} on layer {layer}" for layer, n in layers.most_common()))
+    d.lines[:] = [pl for pl, out in zip(d.lines, far | through, strict=True) if not out]
 
 
 # ---------------------------------------------------------------- geometry helpers

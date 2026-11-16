@@ -24,7 +24,6 @@ from scipy.spatial import cKDTree
 from shapely.geometry import Point, Polygon
 
 from . import source
-from .errors import InputError
 from .project import Project
 
 ROOM_TOL = 60.0                             # same room on two storeys: size differs by less than this
@@ -104,6 +103,8 @@ def _room_names(d: source.Drawing) -> dict[str, str]:
     polys = [(pl.handle, Polygon(_ring(pl))) for pl in d.rooms if pl.closed and len(pl.pts) >= 3]
     out: dict[str, str] = {}
     for lb in d.labels:
+        if not lb.name:                 # a plain text with the room number only
+            continue
         pt = Point(lb.x, lb.y)
         for h, p in polys:
             if p.is_valid and p.contains(pt):
@@ -147,9 +148,10 @@ def _vote2d(P: np.ndarray, Q: np.ndarray, around: tuple[float, float] | None, wi
         for i in range(0, len(P), 256):
             d = (Q[None, :, :] - P[i:i + 256, None, :]).reshape(-1, 2)
             k = np.floor(d / bin_ + 0.5).astype(np.int64)
-            u, c = np.unique(k, axis=0, return_counts=True)
+            u, c = np.unique((k[:, 0] << 32) + k[:, 1], return_counts=True)      # one number for a pair: sorted far faster
             m = c >= 2                                            # a true translation is hit many times per chunk
-            keys.update({(int(a), int(b)): int(n) for (a, b), n in zip(u[m], c[m], strict=True)})
+            a = (u[m] + (1 << 31)) >> 32
+            keys.update(dict(zip(zip(a.tolist(), (u[m] - (a << 32)).tolist(), strict=True), c[m].tolist(), strict=True)))
     else:
         tree = cKDTree(Q)
         for p, js in zip(P, tree.query_ball_point(P + np.array(around), window * math.sqrt(2)), strict=True):
@@ -214,18 +216,22 @@ def _coarse_from_arcs(a: _Features, b: _Features) -> tuple[float, float] | None:
     return (float(c[i, 0]), float(c[i, 1])) if n[i] >= 2 else None
 
 
-def _match(a: _Features, b: _Features, cores: tuple[str, ...]) -> tuple[tuple[float, float], dict] | None:
-    """Translation that puts block `a` on block `b`, or None when the evidence is too thin.
+_Votes = list[tuple[tuple[float, float], int]]
+
+
+def _match(a: _Features, b: _Features, cores: tuple[str, ...]) -> tuple[tuple[tuple[float, float], dict] | None, _Votes]:
+    """Translation that puts block `a` on block `b`, or None when the evidence is too thin. With None come
+    the translations that the end points alone allow, the best first: they did not decide.
 
     `cores` are words in the names of the rooms that run through all storeys: lifts, stairs, shafts.
     """
     if len(a.pts) == 0 or len(b.pts) == 0:
-        return None
+        return None, []
     t = _coarse_from_arcs(a, b)
     if t is not None:
         n = len(_exact_pairs(a.pts, b.pts, t))
         if n >= MIN_EXACT:
-            return t, {"method": "arcs with equal radius", "exact_points": n}
+            return (t, {"method": "arcs with equal radius", "exact_points": n}), []
     rooms = _coarse_from_rooms(a, b, cores)
     if rooms is not None and rooms[1] >= 6.0:
         coarse, _, count = rooms
@@ -235,12 +241,39 @@ def _match(a: _Features, b: _Features, cores: tuple[str, ...]) -> tuple[tuple[fl
               "coarse": [round(coarse[0], 1), round(coarse[1], 1)], "x_votes": vx, "y_votes": vy,
               "exact_points": len(_exact_pairs(a.pts, b.pts, (tx, ty)))}
         if vx and vy and vx[0][1] >= 20 and vy[0][1] >= 20 and ev["exact_points"] >= MIN_EXACT:
-            return (tx, ty), ev         # the two axes agree in a translation that makes end points coincide
+            return ((tx, ty), ev), []       # the two axes agree in a translation that makes end points coincide
     ranked = _vote2d(a.pts, b.pts, None, 0.0)
     if ranked and ranked[0][1] >= MIN_EXACT and (len(ranked) == 1 or ranked[0][1] >= 1.5 * ranked[1][1]):
-        return ranked[0][0], {"method": "coincident end points", "exact_points": ranked[0][1],
-                              "runner_up": ranked[1][1] if len(ranked) > 1 else 0}
-    return None
+        return (ranked[0][0], {"method": "coincident end points", "exact_points": ranked[0][1],
+                               "runner_up": ranked[1][1] if len(ranked) > 1 else 0}), []
+    return None, ranked
+
+
+def _place_in_doubt(b: Block, blocks: dict[str, list[Block]], refs: list[Block],
+                    ranked: dict[tuple[str, str], _Votes]) -> None:
+    """Place a block for which no evidence decides, and say what was assumed. The model stays whole, and a
+    person who knows the building can pin the block in the project file."""
+    pin = f'If the block is displaced in the model, pin it: [registration] "{b.id}" = [tx, ty].'
+    for r in refs:
+        votes = ranked.get((b.id, r.id), [])
+        fit = [(t, n) for t, n in votes if n >= MIN_EXACT and 1.5 * n >= votes[0][1]]
+        if fit:
+            t, n = min(fit, key=lambda c: math.hypot(*c[0]))
+            b.t = (t[0] + r.t[0], t[1] + r.t[1])
+            b.evidence = {"method": "coincident end points, not decisive", "exact_points": n, "against": r.id,
+                          "doubt": f"its place is in doubt. {len(fit)} translations put it on block {r.id} about equally "
+                                   f"well ({', '.join(str(n) for _, n in fit)} coincident end points); the one that "
+                                   f"moves it least was taken. {pin}"}
+            break
+    else:
+        beside = sorted((s for s in blocks[b.level] if s.placed), key=lambda s: s.outline.distance(b.outline))
+        r = (beside or refs)[0]
+        b.t = r.t
+        b.evidence = {"method": f"no evidence: as block {r.id}", "against": r.id,
+                      "doubt": "its place is in doubt. Nothing in it is found in another storey; it was placed as block "
+                               f"{r.id}" + (" of the same drawing" if beside else ", as if the two drawings had the "
+                                                                                 "same coordinates") + f". {pin}"}
+    b.placed = True
 
 
 def register(project: Project, drawings: dict[str, source.Drawing]) -> dict[str, list[Block]]:
@@ -256,25 +289,33 @@ def register(project: Project, drawings: dict[str, source.Drawing]) -> dict[str,
     if not root.placed:
         root.t, root.placed, root.evidence = (0.0, 0.0), True, {"method": "reference"}
     todo = sorted((b for bl in blocks.values() for b in bl if not b.placed), key=lambda b: -b.outline.area)
-    progress = True
-    while todo and progress:
-        progress = False
-        for b in list(todo):
-            refs = sorted((r for bl in blocks.values() for r in bl if r.placed and r.level != b.level),
-                          key=lambda r: (abs(elev[r.level] - elev[b.level]), -r.outline.area))
-            for r in refs:
-                m = _match(feats[b.id], feats[r.id], project.input.cores)
-                if m is None:
-                    continue
-                (tx, ty), ev = m
-                b.t, b.placed = (tx + r.t[0], ty + r.t[1]), True
-                b.evidence = {**ev, "against": r.id}
-                todo.remove(b)
-                progress = True
-                break
-    if todo:
-        raise InputError("no registration found for block(s) " + ", ".join(b.id for b in todo)
-                         + '. Pin them in the project file: [registration] "level/block" = [tx, ty]')
+    tried: dict[tuple[str, str], tuple[tuple[float, float], dict] | None] = {}      # a pair of blocks is matched once
+    ranked: dict[tuple[str, str], _Votes] = {}
+
+    def refs_of(b: Block) -> list[Block]:
+        return sorted((r for bl in blocks.values() for r in bl if r.placed and r.level != b.level),
+                      key=lambda r: (abs(elev[r.level] - elev[b.level]), -r.outline.area))
+
+    while todo:
+        progress = True
+        while todo and progress:
+            progress = False
+            for b in list(todo):
+                for r in refs_of(b):
+                    if (b.id, r.id) not in tried:
+                        tried[b.id, r.id], ranked[b.id, r.id] = _match(feats[b.id], feats[r.id], project.input.cores)
+                    m = tried[b.id, r.id]
+                    if m is None:
+                        continue
+                    (tx, ty), ev = m
+                    b.t, b.placed = (tx + r.t[0], ty + r.t[1]), True
+                    b.evidence = {**ev, "against": r.id}
+                    todo.remove(b)
+                    progress = True
+                    break
+        if todo:        # the largest block left is placed in doubt; the others can then find evidence against it
+            _place_in_doubt(todo[0], blocks, refs_of(todo[0]), ranked)
+            del todo[0]
     return blocks
 
 

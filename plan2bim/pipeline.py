@@ -64,7 +64,9 @@ class Outcome:
 
 
 def read_drawings(project: Project) -> Read:
-    drawings = {lv.key: source.read(lv.key, source.to_dxf(lv.drawing, project.out / "dxf" / f"{lv.key}.dxf"), project.input)
+    # the conversion of a DWG is kept under the storey: KEY.dxf for its first drawing, KEY.2.dxf for its second
+    drawings = {lv.key: source.read(lv.key, {p.name: source.to_dxf(p, project.out / "dxf" / f"{lv.key}{f'.{i}' if i > 1 else ''}.dxf")
+                                             for i, p in enumerate(lv.drawings, start=1)}, project.input)
                 for lv in project.levels}
     blocks = register.register(project, drawings)
     levels = {lv.key: level.build(project, drawings[lv.key], blocks[lv.key]) for lv in project.levels}

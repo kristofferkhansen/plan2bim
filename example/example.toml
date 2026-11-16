@@ -16,7 +16,9 @@ window_head = 2100
 landing = 200            # stair landings, and the stair under each tread
 balustrade = 1100        # balcony balustrades and stair guards
 
-# One drawing for each storey, DWG or DXF. `elevation` is the top of the structural floor.
+# The drawing of each storey, DWG or DXF. `elevation` is the top of the structural floor.
+# A storey of which the outlines and the plan are two drawings with the same coordinates names both:
+# drawing = ["level-1-areas.dwg", "level-1-plan.dwg"]
 [[level]]
 key = "1"
 name = "Level 1"
@@ -57,15 +59,20 @@ up = "E"                              # direction of climb: N, S, E or W
 # sweep_deg = 360                     # total turn, positive counter-clockwise
 
 # The convention of the drawings. Each value below, apart from `shafts` and `cores`, is the default.
+# A layer name can hold `*` for any text. Where a layer fits two contents, the first of these wins:
+# ignore, rooms, gross, inner, room_number_text, room_name_text, lines.
 [input]
-unit = "mm"                           # unit of the drawing coordinates: mm, cm or m
-lines = "0"                           # layer, or list of layers, with the building lines
-rooms = "Area_NTA"                    # room outlines and room labels
-gross = "Area_BTA"                    # gross outline of each building block
-inner = "Area_BRA"                    # inner face of the exterior walls
-room_number = "ROOMNUMBER"            # attribute tags of the room label block
+unit = "mm"                                   # unit of the drawing coordinates: mm, cm or m
+lines = "*"                                   # layer, or list of layers, with the building lines
+rooms = ["Area_NTA", "862 - Rom NTA"]         # room outlines and room labels
+gross = ["Area_BTA", "861 - Etasje BTA"]      # gross outline of each building block
+inner = "Area_BRA"                            # inner face of the exterior walls
+ignore = []                                   # layers that are not read, for example furniture
+room_number = "ROOMNUMBER"                    # attribute tags of the room label block
 room_name = "ROOMNAME"
 room_wing = "WING"
+room_number_text = "F29-T1-Nr"                # layers with the room number and the room name as plain texts
+room_name_text = "F29-T2-Navn"
 shafts = ["lift", "shaft"]            # room names of lifts and shafts: no floor in them above the lowest storey
 cores = ["lift", "stair", "shaft"]    # words in the names of rooms that run through all storeys (default: Norwegian)
 
