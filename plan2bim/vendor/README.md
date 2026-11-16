@@ -1,20 +1,39 @@
-# three.js
+# three.js and N8AO
 
-The viewer uses three.js r149 (https://threejs.org). `three.min.js` is the file
-https://unpkg.com/three@0.149.0/build/three.min.js, unchanged:
+The viewer uses three.js r187 (https://threejs.org) and N8AO 2.1.0 (https://github.com/N8python/n8ao), which
+shades the corners. `three.bundle.min.js` holds the parts of the two that `plan2bim/viewer.html` uses, as one
+script that sets the global `THREE`.
 
 ```sh
-sha256sum plan2bim/vendor/three.min.js
-# 8a5f7249903b54d30f79f708699d2fed2d6a1d0741a4cd41377d1f01bb5a2271
+sha256sum plan2bim/vendor/three.bundle.min.js
+# c858057ed8f0d700dbc24eeab1bc3bc6e457fcc33935fa0882a89f0c223980bb
 ```
 
 `plan2bim/web.py` copies it into each `NAME.html`, so the viewer needs no network.
 
-## Licence of three.js
+## How to make the file again
+
+The file is made from `viewer-lib/` in the root of the repository. This needs Node.js and network access.
+`plan2bim` itself, its tests and its container need neither: they use the file that is here.
+
+```sh
+cd viewer-lib
+npm ci          # the versions in package-lock.json
+npm run build   # writes plan2bim/vendor/three.bundle.min.js and prints its size and sha256
+```
+
+`viewer-lib/entry.js` lists each name that the viewer uses. Add a name there when the viewer needs one more,
+make the file again, and write the new sha256 above.
+
+## Licences
+
+N8AO: CC0 1.0 Universal (the file `LICENSE` of the package; its `package.json` says ISC). It asks for no notice.
+
+three.js:
 
 The MIT License
 
-Copyright © 2010-2023 three.js authors
+Copyright © 2010-2026 three.js authors
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

@@ -1,6 +1,6 @@
 """One HTML file that shows the model in a browser.
 
-The file holds the geometry, the viewer, three.js itself and the IFC file of the model. It needs no server
+The file holds the geometry, the viewer, its libraries (three.js, N8AO) and the IFC file of the model. It needs no server
 and loads nothing from the network, so it can be opened from disk, mailed, or published as it is. A person
 who has this file only can save the IFC file from it.
 """
@@ -16,7 +16,7 @@ from pathlib import Path
 import numpy as np
 
 from .level import Level
-from .mesh import Solid, feature_edges, joined, triangles
+from .mesh import CREASE, Solid, contour_edges, feature_edges, joined, triangles
 from .model import Model
 from .project import Project
 
@@ -57,11 +57,11 @@ def payload(project: Project, levels: dict[str, Level], model: Model, solids: li
     rank = {lv.key: i for i, lv in enumerate(project.levels)}
     meshes.sort(key=lambda m: (rank[m[0].level], ORDER.index(m[0].category), m[0].material))
 
-    def edges(body) -> str:
-        return _b64(((feature_edges(body) - np.tile(origin, 2)) / 1000.0).astype("<f4"))
+    def lines(rows: np.ndarray) -> str:         # rows of points, three numbers each
+        return _b64(((rows - np.tile(origin, rows.shape[1] // 3)) / 1000.0).astype("<f4"))
 
     # walls of all storeys as one solid: its edges show no line where two storeys meet flush
-    whole = [{"category": cat, "e": edges(body)} for cat, material in JOINED
+    whole = [{"category": cat, "e": lines(feature_edges(body))} for cat, material in JOINED
              if (body := joined(solids, cat, material)) is not None]
     kinds: dict[str, int] = {}
     for e in model.elements:
@@ -72,11 +72,13 @@ def payload(project: Project, levels: dict[str, Level], model: Model, solids: li
         "name": project.name,
         "origin": origin.tolist(),
         "plan_cut": PLAN_CUT,
+        "crease": CREASE,
         "counts": counts,
         "levels": [{"key": lv.key, "name": lv.name, "elevation": lv.elevation, "top": project.top_of(lv.key)}
                    for lv in project.levels],
         "solids": [{"level": s.level, "category": s.category, "material": s.material,
-                    "v": _b64(((v - origin) / 1000.0).astype("<f4")), "i": _b64(t.astype("<u4")), "e": edges(s.body)}
+                    "v": _b64(((v - origin) / 1000.0).astype("<f4")), "i": _b64(t.astype("<u4")),
+                    "e": lines(feature_edges(s.body)), "c": lines(contour_edges(s.body))}
                    for s, v, t in meshes],
         "whole": whole,
         "lines": [{"level": key, "p": _b64(((lv.segs - np.tile(origin[:2], 2)) / 1000.0).astype("<f4"))}
@@ -95,7 +97,7 @@ def write(path: Path, project: Project, levels: dict[str, Level], model: Model, 
     data = {**payload(project, levels, model, solids), "ifc": ifc.name}
     fill = {
         "__TITLE__": html.escape(project.name),
-        "__THREE__": (HERE / "vendor" / "three.min.js").read_text(encoding="utf-8"),
+        "__THREE__": (HERE / "vendor" / "three.bundle.min.js").read_text(encoding="utf-8"),
         "__DATA__": json.dumps(data, separators=(",", ":"), ensure_ascii=False).replace("</", "<\\/"),
         "__IFC__": base64.b64encode(gzip.compress(ifc.read_bytes(), mtime=0)).decode("ascii"),
     }

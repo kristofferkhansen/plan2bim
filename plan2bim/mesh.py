@@ -16,6 +16,7 @@ from .model import Element, Model, Piece
 
 CATEGORY = {"wall": "walls", "slab": "floors", "roof": "roofs", "door": "doors", "window": "windows",
             "stair": "stairs", "column": "columns", "railing": "balconies"}
+CREASE = 25.0       # degrees: where the surface turns by more over an edge, the edge is drawn and the shading breaks
 
 
 @dataclass
@@ -76,16 +77,11 @@ def section(body: m3.Manifold, z: float) -> list[Polygon]:
     return out
 
 
-def feature_edges(body: m3.Manifold, degrees: float = 25.0, fine: float = 12.0) -> np.ndarray:
-    """The edges where the surface turns by more than `degrees`, as rows of x1 y1 z1 x2 y2 z2 in mm.
-
-    An edge beside a strip of surface narrower than `fine` is left out. Such a strip is a step of a few
-    millimetres, for example where the outlines of two storeys do not agree exactly. A line there
-    would show a feature that is smaller than the line itself.
-    """
+def _edges(body: m3.Manifold):
+    """The edges of the surface, each with its two triangles: the corners `v`, the triangles `t`, and for each edge
+    its two corners `e`, its two triangles `a` and `b`, the cosine of the angle by which the surface turns there,
+    and the width of the narrower of the two triangles measured from the edge."""
     v, t = triangles(body)
-    if len(t) == 0:
-        return np.zeros((0, 6))
     normal = np.cross(v[t[:, 1]] - v[t[:, 0]], v[t[:, 2]] - v[t[:, 0]])
     size = np.linalg.norm(normal, axis=1)               # twice the area of each triangle
     normal /= np.maximum(size, 1e-12)[:, None]
@@ -98,10 +94,34 @@ def feature_edges(body: m3.Manifold, degrees: float = 25.0, fine: float = 12.0) 
     pair = np.flatnonzero(key[1:] == key[:-1])          # a closed surface: each edge has two triangles
     a, b, e = owner[pair], owner[pair + 1], ends[pair]
     length = np.linalg.norm(v[e[:, 1]] - v[e[:, 0]], axis=1)
-    across = np.minimum(size[a], size[b]) / np.maximum(length, 1e-9)    # the narrower triangle, measured from the edge
-    sharp = (np.einsum("ij,ij->i", normal[a], normal[b]) < np.cos(np.radians(degrees))) & (across >= fine)
-    e = e[sharp]
+    across = np.minimum(size[a], size[b]) / np.maximum(length, 1e-9)
+    return v, t, e, a, b, np.einsum("ij,ij->i", normal[a], normal[b]), across
+
+
+def feature_edges(body: m3.Manifold, degrees: float = CREASE, fine: float = 12.0) -> np.ndarray:
+    """The edges where the surface turns by more than `degrees`, as rows of x1 y1 z1 x2 y2 z2 in mm.
+
+    An edge beside a strip of surface narrower than `fine` is left out. Such a strip is a step of a few
+    millimetres, for example where the outlines of two storeys do not agree exactly. A line there
+    would show a feature that is smaller than the line itself.
+    """
+    v, _t, e, _a, _b, turn, across = _edges(body)
+    e = e[(turn < np.cos(np.radians(degrees))) & (across >= fine)]
     return np.hstack([v[e[:, 0]], v[e[:, 1]]])
+
+
+def contour_edges(body: m3.Manifold, degrees: float = CREASE, fine: float = 12.0) -> np.ndarray:
+    """The edges where the surface turns, but by no more than `degrees`: the facets of a round surface. As rows
+    of x1 y1 z1 x2 y2 z2 in mm, and then the third corner of each of the two triangles at the edge.
+
+    A viewer shades such a surface as round and draws no line on it. It draws one of these edges only where it is
+    the outline of the surface as the eye sees it: where the two third corners are on the same side of the edge.
+    """
+    v, t, e, a, b, turn, across = _edges(body)
+    keep = (turn >= np.cos(np.radians(degrees))) & (turn < np.cos(np.radians(0.5))) & (across >= fine)
+    e, a, b = e[keep], a[keep], b[keep]
+    third = [t[k].astype(np.int64).sum(axis=1) - e.sum(axis=1) for k in (a, b)]
+    return np.hstack([v[e[:, 0]], v[e[:, 1]], v[third[0]], v[third[1]]])
 
 
 def joined(solids: list[Solid], category: str, material: str) -> m3.Manifold | None:

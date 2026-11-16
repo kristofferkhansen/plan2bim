@@ -105,6 +105,7 @@ No public drawing has the area layers, so these tests read drawings and build no
 | `plan2bim/mesh.py`, `web.py`, `viewer.html`, `ifc.py` | Closed solids, the viewer, the IFC file |
 | `plan2bim/verify.py`, `qa.py` | Checks of the finished model, review plots |
 | `plan2bim/service.py`, `store.py`, `site/` | The web service, where it keeps projects, its page |
+| `viewer-lib/`, `plan2bim/vendor/` | The source of the three.js file that the viewer holds, and that file as built |
 
 `docs/plan2bim.md` gives the method, the assumptions, the checks and the tools.
 

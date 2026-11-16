@@ -84,7 +84,7 @@ A wall is not a centre line with a thickness. A wall is the area that the drawn 
 | 6 | `assemble.py` | Gives each cell its heights from the project file. Each piece of each element is a vertical prism: a plan polygon, a bottom and a top. |
 | 7 | `mesh.py` | Joins the prisms of one material, category and storey into one closed solid (manifold3d). The join removes all faces between adjoining prisms. This is why the display has no doubled faces and no flicker. |
 | 8 | `ifc.py` | Writes the IFC file: wall, opening that cuts the wall, door or window that fills the opening. Rooms are `IfcSpace`. Doors and windows carry their overall size. Rooms, walls, plates, columns, doors and windows carry base quantities. |
-| 9 | `web.py`, `viewer.html` | Writes the viewer: the solids, the viewer code, three.js r149 and the IFC file (packed with gzip) in one HTML file. |
+| 9 | `web.py`, `viewer.html` | Writes the viewer: the solids, their edges, the viewer code, three.js r187 and the IFC file (packed with gzip) in one HTML file. The viewer shades the corners, draws a soft shadow on the ground, shades a round surface as round and moves the view smoothly. On a machine that draws slowly it leaves out what costs most. |
 | 10 | `verify.py` | Checks the finished model. See "Checks". |
 
 ### Registration
@@ -246,7 +246,7 @@ in `out/NAME.txt`:
 | numpy, scipy | Coordinates, nearest-point search. | Yes. |
 | manifold3d | Joins prisms into closed solids. Finds overlaps. | Yes. It guarantees closed solids. |
 | ifcopenshell | Writes IFC4. Reads it back with a second geometry kernel. Validates the schema. | Yes. |
-| three.js r149 | The viewer. It is copied into the HTML file. | Yes, for the viewer. |
+| three.js r187, N8AO 2.1.0 | The viewer, and the shade in its corners. The parts that the viewer uses are one file in `plan2bim/vendor/`, made from `viewer-lib/` (see `plan2bim/vendor/README.md`). It is copied into the HTML file. | Yes, for the viewer. |
 | matplotlib | Review plots. | For review only. |
 | A headless browser | Screenshots of the viewer for visual checks. | For review only. |
 

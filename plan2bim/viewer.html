@@ -50,6 +50,7 @@
   <div id="categories"></div>
   <label><input type="checkbox" id="edges" checked><span class="grow">Edges</span></label>
   <label><input type="checkbox" id="shadows" checked><span class="grow">Shadows</span></label>
+  <label><input type="checkbox" id="ao" checked><span class="grow">Shade in corners</span></label>
   <label><input type="checkbox" id="rooms"><span class="grow">Room numbers and names</span></label>
   <label><input type="checkbox" id="source"><span class="grow">Source drawing (red lines)</span></label>
   <h2>Section</h2>
@@ -78,7 +79,7 @@
     <ul id="notes"></ul>
   </details>
 </aside>
-<div id="hint">Drag: turn &middot; Right drag or Shift+drag: move &middot; Wheel: zoom &middot; Double-click: turn about that point</div>
+<div id="hint">Drag: turn about the point under the pointer &middot; Right drag or Shift+drag: move &middot; Wheel: zoom &middot; Double-click: centre that point</div>
 <div id="fail"></div>
 <script>__THREE__</script>
 <script id="model" type="application/json">__DATA__</script>
@@ -89,20 +90,26 @@
   const D = JSON.parse(document.getElementById("model").textContent);
   const $ = (id) => document.getElementById(id);
   const canvas = $("view");
+  const rad = THREE.MathUtils.degToRad;
   let renderer;
   try {
-    renderer = new THREE.WebGLRenderer({ canvas, antialias: true, stencil: true });
+    // the picture is drawn into `beauty` and from there to the window: the window itself needs no depth and no smoothing
+    renderer = new THREE.WebGLRenderer({ canvas, antialias: false, depth: false, stencil: false });
   } catch (err) {
     $("fail").style.display = "flex";
-    $("fail").textContent = "This browser cannot show 3D graphics (WebGL is not available).";
+    $("fail").textContent = "This browser cannot show 3D graphics (WebGL 2 is not available).";
     return;
   }
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
   renderer.localClippingEnabled = true;
   renderer.shadowMap.enabled = true;
-  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  renderer.shadowMap.type = THREE.PCFShadowMap;
+  renderer.shadowMap.autoUpdate = false;        // the sun stands still: `change` asks for new shadows
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(0xeef1f4);
+  const depth = new THREE.DepthTexture(1, 1, THREE.UnsignedInt248Type);
+  depth.format = THREE.DepthStencilFormat;
+  const beauty = new THREE.WebGLRenderTarget(1, 1, {
+    samples: 4, stencilBuffer: true, depthTexture: depth, colorSpace: THREE.SRGBColorSpace });
 
   // ---------------------------------------------------------------- data
   function bytes(b64) {
@@ -128,7 +135,22 @@
     stencilFunc: THREE.AlwaysStencilFunc, stencilFail: op, stencilZFail: op, stencilZPass: op });
   const backs = stencil(THREE.BackSide, THREE.IncrementWrapStencilOp);
   const fronts = stencil(THREE.FrontSide, THREE.DecrementWrapStencilOp);
-  const edgeMaterial = new THREE.LineBasicMaterial({ color: 0x2c3138, clippingPlanes: planes });
+  const edgeMaterial = new THREE.LineMaterial({ color: 0x2c3138, linewidth: 1.3, clippingPlanes: planes });
+  // An edge on a round surface: drawn only where it is the outline of the surface as the eye sees it. That is where
+  // the third corners of its two triangles are on the same side of it in the window (see `contour_edges` in mesh.py).
+  const contourMaterial = new THREE.LineMaterial({ color: 0x2c3138, linewidth: 1.3, clippingPlanes: planes });
+  contourMaterial.onBeforeCompile = (shader) => {
+    shader.vertexShader = shader.vertexShader
+      .replace("void main() {", "attribute vec3 third0;\nattribute vec3 third1;\nvoid main() {")
+      .replace("gl_Position = clip;", `gl_Position = clip;
+        vec4 clip0 = projectionMatrix * modelViewMatrix * vec4(third0, 1.0);
+        vec4 clip1 = projectionMatrix * modelViewMatrix * vec4(third1, 1.0);
+        vec2 along = ndcEnd.xy - ndcStart.xy;
+        vec2 to0 = clip0.xy / clip0.w - ndcStart.xy, to1 = clip1.xy / clip1.w - ndcStart.xy;
+        if ((along.x * to0.y - along.y * to0.x) * (along.x * to1.y - along.y * to1.x) < 0.0) {
+          gl_Position = vec4(2.0, 2.0, 2.0, 1.0);       // not in the window
+        }`);
+  };
   const sourceMaterial = new THREE.LineBasicMaterial({ color: 0xe0102a, depthTest: false, transparent: true });
 
   const levels = {};          // key -> { spec, group, source, meshes: [] }
@@ -139,23 +161,76 @@
     levels[spec.key] = { spec, group, meshes: [], source: null, box: new THREE.Box3() };
   }
   let triangles = 0;
-  function edgeGeometry(b64) {
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(bytes(b64)), 3));
-    return geometry;
+  // The corners of all triangles, each with a normal. Where the surface turns by less than `D.crease` degrees over an
+  // edge, the triangles on its two sides share their normals there: a curved wall is shaded as a curve. Such an edge
+  // has no line (see `feature_edges` in mesh.py). Each triangle counts by its angle at the corner.
+  const SMOOTH = Math.cos(rad(D.crease));
+  function corners(pos, idx) {
+    const unit = new Float32Array(idx.length), angle = new Float32Array(idx.length);
+    const p = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
+    const a = new THREE.Vector3(), b = new THREE.Vector3();
+    for (let t = 0; t < idx.length; t += 3) {
+      for (let c = 0; c < 3; c++) p[c].fromArray(pos, 3 * idx[t + c]);
+      for (let c = 0; c < 3; c++) angle[t + c] = a.subVectors(p[(c + 1) % 3], p[c]).angleTo(b.subVectors(p[(c + 2) % 3], p[c]));
+      a.subVectors(p[1], p[0]).cross(b.subVectors(p[2], p[0])).normalize().toArray(unit, t);     // zero: no area
+    }
+    const start = new Uint32Array(pos.length / 3 + 1);      // the corners at each vertex
+    for (let k = 0; k < idx.length; k++) start[idx[k] + 1] += 1;
+    for (let v = 1; v < start.length; v++) start[v] += start[v - 1];
+    const at = new Uint32Array(idx.length), next = start.slice();
+    for (let k = 0; k < idx.length; k++) at[next[idx[k]]++] = k;
+    const position = new Float32Array(3 * idx.length), normal = new Float32Array(3 * idx.length);
+    for (let k = 0; k < idx.length; k++) {
+      const v = idx[k], t = k - k % 3;
+      let x = 0, y = 0, z = 0;
+      for (let j = start[v]; j < start[v + 1]; j++) {
+        const u = at[j] - at[j] % 3;
+        if (unit[t] * unit[u] + unit[t + 1] * unit[u + 1] + unit[t + 2] * unit[u + 2] < SMOOTH) continue;
+        x += angle[at[j]] * unit[u]; y += angle[at[j]] * unit[u + 1]; z += angle[at[j]] * unit[u + 2];
+      }
+      const length = Math.hypot(x, y, z) || 1;
+      position[3 * k] = pos[3 * v]; position[3 * k + 1] = pos[3 * v + 1]; position[3 * k + 2] = pos[3 * v + 2];
+      normal[3 * k] = x / length; normal[3 * k + 1] = y / length; normal[3 * k + 2] = z / length;
+    }
+    return { position, normal };
+  }
+  function edgeLines(b64, kind, category) {      // null: the solid has no edge
+    const ends = new Float32Array(bytes(b64));
+    if (ends.length === 0) return null;
+    const lines = new THREE.LineSegments2(new THREE.LineSegmentsGeometry().setPositions(ends), edgeMaterial);
+    lines.renderOrder = 4;
+    lines.userData.edges = kind;
+    lines.userData.of = category;
+    return lines;
+  }
+  function contourLines(b64) {      // null: the solid has no round surface
+    const rows = new Float32Array(bytes(b64)), n = rows.length / 12;
+    if (n === 0) return null;
+    const ends = new Float32Array(6 * n), third = [new Float32Array(3 * n), new Float32Array(3 * n)];
+    for (let i = 0; i < n; i++) {
+      ends.set(rows.subarray(12 * i, 12 * i + 6), 6 * i);
+      third[0].set(rows.subarray(12 * i + 6, 12 * i + 9), 3 * i);
+      third[1].set(rows.subarray(12 * i + 9, 12 * i + 12), 3 * i);
+    }
+    const geometry = new THREE.LineSegmentsGeometry().setPositions(ends);
+    third.forEach((t, k) => geometry.setAttribute("third" + k, new THREE.InstancedBufferAttribute(t, 3)));
+    const lines = new THREE.LineSegments2(geometry, contourMaterial);
+    lines.renderOrder = 4;
+    lines.userData.edges = "contour";
+    return lines;
   }
   for (const s of D.solids) {
     const lv = levels[s.level];
+    const index = new Uint32Array(bytes(s.i)), shaded = corners(new Float32Array(bytes(s.v)), index);
     const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(bytes(s.v)), 3));
-    geometry.setIndex(new THREE.BufferAttribute(new Uint32Array(bytes(s.i)), 1));
-    geometry.computeVertexNormals();      // shading is flat; the shadow test moves along these to avoid speckle
+    geometry.setAttribute("position", new THREE.BufferAttribute(shaded.position, 3));
+    geometry.setAttribute("normal", new THREE.BufferAttribute(shaded.normal, 3));
     geometry.computeBoundingBox();
     geometry.computeBoundingSphere();
-    triangles += geometry.index.count / 3;
+    triangles += index.length / 3;
     const glass = s.material === "glass";
     const material = new THREE.MeshStandardMaterial({
-      color: COLOUR[s.category + "/" + s.material] || 0xcccccc, roughness: glass ? 0.15 : 0.92, metalness: 0.0, flatShading: true,
+      color: COLOUR[s.category + "/" + s.material] || 0xcccccc, roughness: glass ? 0.15 : 0.92, metalness: 0.0,
       clippingPlanes: planes, clipShadows: true, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1,
       transparent: glass, opacity: glass ? 0.4 : 1.0, depthWrite: !glass });
     const mesh = new THREE.Mesh(geometry, material);
@@ -165,11 +240,9 @@
     const holder = new THREE.Group();
     holder.userData.category = s.category;
     holder.add(mesh);
-    const lines = new THREE.LineSegments(edgeGeometry(s.e), edgeMaterial);
-    lines.renderOrder = 4;
-    lines.userData.edges = "own";
-    lines.userData.of = s.category;
-    holder.add(lines);
+    for (const lines of [edgeLines(s.e, "own", s.category), contourLines(s.c)]) {
+      if (lines) holder.add(lines);
+    }
     if (s.category in CAPPED) {
       for (const m of [backs, fronts]) {
         const helper = new THREE.Mesh(geometry, m);
@@ -187,10 +260,8 @@
   // edges of a kind of solid over all storeys: no line where two storeys meet flush
   const wholes = {};
   for (const s of D.whole) {
-    const lines = new THREE.LineSegments(edgeGeometry(s.e), edgeMaterial);
-    lines.renderOrder = 4;
-    lines.userData.edges = "whole";
-    lines.userData.of = s.category;
+    const lines = edgeLines(s.e, "whole", s.category);
+    if (!lines) continue;
     lines.visible = false;
     scene.add(lines);
     wholes[s.category] = lines;
@@ -227,41 +298,85 @@
   });
 
   // ---------------------------------------------------------------- light
-  scene.add(new THREE.HemisphereLight(0xffffff, 0x9aa3ad, 0.78));
-  const sun = new THREE.DirectionalLight(0xffffff, 0.62);
+  // A white wall in the sun stays below white, and a wall in the shade is a clear step darker.
+  const sky = new THREE.HemisphereLight(0xffffff, 0xd0d4d9, 1.9);
+  sky.position.set(0, 0, 1);        // up is +z in the model
+  scene.add(sky);
+  const sun = new THREE.DirectionalLight(0xffffff, 2.35);
   sun.position.copy(centre).add(new THREE.Vector3(-0.55, -0.75, 1.1).normalize().multiplyScalar(2 * radius));
   sun.target.position.copy(centre);
   sun.castShadow = true;
   sun.shadow.mapSize.set(4096, 4096);
   sun.shadow.bias = -0.0005;
   sun.shadow.normalBias = 0.04;
+  sun.shadow.radius = 2.5;
   const sc = sun.shadow.camera;
   sc.left = -radius; sc.right = radius; sc.top = radius; sc.bottom = -radius; sc.near = 0.5; sc.far = 4 * radius;
   sc.updateProjectionMatrix();
   scene.add(sun, sun.target);
-  const fill = new THREE.DirectionalLight(0xffffff, 0.22);
+  const fill = new THREE.DirectionalLight(0xffffff, 0.3);
   fill.position.set(0.8, 0.5, 0.4);
   scene.add(fill);
+  // Not the ground: the model holds none. A plane under the lowest solid in view, on which only the shadow shows.
+  const ground = new THREE.Mesh(new THREE.CircleGeometry(8 * radius, 48), new THREE.ShadowMaterial({ opacity: 0.3 }));
+  ground.receiveShadow = true;
+  ground.position.set(centre.x, centre.y, bounds.min.z);
+  scene.add(ground);
 
   // ---------------------------------------------------------------- camera
   const FOV = 40;
   const persp = new THREE.PerspectiveCamera(FOV, 1, 0.1, 5000);
   const ortho = new THREE.OrthographicCamera(-1, 1, 1, -1, -5000, 5000);
+  // `view` is what the window shows. It follows `goal`: where the user or a button has asked to look from.
   const view = { target: centre.clone(), az: -2.2, el: 0.62, dist: 2.4 * radius, ortho: false };
+  const goal = { target: centre.clone(), az: -2.2, el: 0.62, dist: 2.4 * radius };
+  const DRAG = 0.04, WHEEL = 0.08, EASE = 0.15;       // seconds in which the view goes 63 % of the way to the goal
+  let lag = 0;
+  let moving = false;
   let camera = persp;
   let dirty = true;
   const need = () => { dirty = true; };
+  function change() {       // what is shown is another thing, not the same thing from another place
+    renderer.shadowMap.needsUpdate = true;
+    if (ao) ao.firstFrame();
+    need();
+  }
+  function axes(az, el) {       // `dir` points from the target to the eye
+    const ce = Math.cos(el);
+    const dir = new THREE.Vector3(ce * Math.cos(az), ce * Math.sin(az), Math.sin(el));
+    const right = new THREE.Vector3(-Math.sin(az), Math.cos(az), 0);
+    return { dir, right, up: new THREE.Vector3().crossVectors(dir, right) };
+  }
+  function go(seconds) {
+    lag = seconds;
+    moving = true;
+  }
+  function arrive() {
+    view.target.copy(goal.target);
+    view.az = goal.az; view.el = goal.el; view.dist = goal.dist;
+    moving = false;
+    need();
+  }
+  function follow(dt) {       // one step of the view towards the goal
+    const k = 1 - Math.exp(-dt / lag);
+    view.target.lerp(goal.target, k);
+    view.az += (goal.az - view.az) * k;
+    view.el += (goal.el - view.el) * k;
+    view.dist *= Math.pow(goal.dist / view.dist, k);
+    const there = view.target.distanceTo(goal.target) < 1e-4 * view.dist && Math.abs(goal.az - view.az) < 1e-4
+      && Math.abs(goal.el - view.el) < 1e-4 && Math.abs(Math.log(goal.dist / view.dist)) < 1e-4;
+    if (there) arrive();
+    need();
+  }
 
   function place() {
     const w = canvas.clientWidth, h = canvas.clientHeight;
-    const ce = Math.cos(view.el);
-    const dir = new THREE.Vector3(ce * Math.cos(view.az), ce * Math.sin(view.az), Math.sin(view.el));
     camera = view.ortho ? ortho : persp;
     camera.up.set(0, 0, 1);
-    camera.position.copy(view.target).addScaledVector(dir, view.dist);
+    camera.position.copy(view.target).addScaledVector(axes(view.az, view.el).dir, view.dist);
     camera.lookAt(view.target);
     if (view.ortho) {
-      const half = view.dist * Math.tan(THREE.MathUtils.degToRad(FOV / 2));
+      const half = view.dist * Math.tan(rad(FOV / 2));
       ortho.left = -half * w / h; ortho.right = half * w / h; ortho.top = half; ortho.bottom = -half;
       ortho.near = -10 * radius; ortho.far = 10 * radius;
     } else {
@@ -272,29 +387,33 @@
     camera.updateProjectionMatrix();
     camera.updateMatrixWorld();
   }
+  const PIXELS = 3840 * 2160;       // the picture has no more pixels than this
   function resize() {
-    renderer.setSize(window.innerWidth, window.innerHeight, false);
+    const w = Math.max(1, window.innerWidth), h = Math.max(1, window.innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2, Math.sqrt(PIXELS / (w * h))));
+    renderer.setSize(w, h, false);
+    const size = renderer.getDrawingBufferSize(new THREE.Vector2());
+    beauty.setSize(size.x, size.y);
+    if (ao) ao.setSize(size.x, size.y);
     need();
   }
   window.addEventListener("resize", resize);
 
-  function fit(box, az, el) {       // the nearest distance from which the whole box is in the window
+  function fit(box, az, el) {       // the goal: the nearest place from which the whole box is in the window
     const c = box.getCenter(new THREE.Vector3());
-    const ce = Math.cos(el);
-    const dir = new THREE.Vector3(ce * Math.cos(az), ce * Math.sin(az), Math.sin(el));
-    const right = new THREE.Vector3(-Math.sin(az), Math.cos(az), 0);
-    const up = new THREE.Vector3().crossVectors(dir, right);
-    const t = Math.tan(THREE.MathUtils.degToRad(FOV / 2)), aspect = canvas.clientWidth / canvas.clientHeight;
+    const { dir, right, up } = axes(az, el);
+    const t = Math.tan(rad(FOV / 2)), aspect = canvas.clientWidth / canvas.clientHeight;
     let dist = 0;
     for (let i = 0; i < 8; i++) {
       const p = new THREE.Vector3(i & 1 ? box.max.x : box.min.x, i & 2 ? box.max.y : box.min.y, i & 4 ? box.max.z : box.min.z).sub(c);
       const towards = view.ortho ? 0 : p.dot(dir);
       dist = Math.max(dist, Math.abs(p.dot(right)) / (t * aspect) + towards, Math.abs(p.dot(up)) / t + towards);
     }
-    view.target.copy(c);
-    view.az = az; view.el = el;
-    view.dist = 1.06 * dist;
-    need();
+    goal.target.copy(c);
+    goal.az = view.az + (az - view.az) - 2 * Math.PI * Math.round((az - view.az) / (2 * Math.PI));      // the short way round
+    goal.el = el;
+    goal.dist = 1.06 * dist;
+    go(EASE);
   }
   function shown() {
     const box = new THREE.Box3();
@@ -308,28 +427,90 @@
     fit(shown(), v[0], v[1]);
   }
 
+  // ---------------------------------------------------------------- shade in corners
+  // N8AO darkens what little sky light reaches: inner corners, window niches, the foot of a wall. It reads the depth
+  // of `beauty`, so it sees what the section and the panel leave. While nothing changes, it gets finer frame by frame.
+  let ao = null;
+  try {
+    ao = new THREE.N8AOPass(scene, persp, 1, 1);
+    ao.beautyRenderTarget.dispose();
+    ao.beautyRenderTarget = beauty;
+    ao.renderToScreen = true;
+    ao.autoDetectTransparency = false;      // glass does not hide what is behind it from the shade
+    Object.assign(ao.configuration, { autoRenderBeauty: false, aoRadius: 1.2, distanceFalloff: 1.0, intensity: 2.5,
+      halfRes: true, accumulate: true });
+  } catch (err) {
+    ao = null;
+    $("ao").checked = false;
+    $("ao").disabled = true;
+  }
+  const REFINE = 64;        // frames in which the shade gets finer while nothing changes
+  const blit = new THREE.Mesh(new THREE.PlaneGeometry(2, 2),
+    new THREE.MeshBasicMaterial({ map: beauty.texture, depthTest: false, depthWrite: false }));
+  const flat = new THREE.OrthographicCamera(-1, 1, 1, -1, -1, 1);
+  // A machine that draws slowly, most often one with no graphics card: no smoothing of slanted lines, and the shade
+  // only when the view stands still and only once. The frame loop sets this and never takes it back.
+  let light = false;
+  function lighten() {
+    light = true;
+    beauty.samples = 0;
+    beauty.dispose();       // made again, with no smoothing, when it is drawn into
+    need();
+  }
+  const shading = () => ao !== null && $("ao").checked;
+  function draw(finer) {      // `finer`: the picture is the one of the frame before, only the shade gets finer
+    const shade = shading() && !(light && moving);
+    if (!finer) {
+      place();
+      if (ao && ao.camera !== camera) {       // the shaders of the shade are not the same for the two projections
+        ao.camera = camera;
+        for (const set of ["configureAOPass", "configureDenoisePass", "configureEffectCompositer"]) {
+          ao[set](ao.configuration.depthBufferType, view.ortho);
+        }
+      }
+      renderer.setRenderTarget(beauty);
+      renderer.render(scene, camera);
+    }
+    if (shade) {
+      ao.render(renderer);
+    } else {
+      renderer.setRenderTarget(null);
+      renderer.render(blit, flat);
+    }
+    if (!finer) placeLabels();
+  }
+
   // ---------------------------------------------------------------- pointer
+  // The pointer moves the goal. The view follows it in a few frames: this hides the steps of a wheel and of a slow mouse.
   const pointers = new Map();
   let pinch = 0;
-  function screenToWorld(dx, dy) {       // movement of the target for a pointer movement in pixels
-    const perPixel = 2 * view.dist * Math.tan(THREE.MathUtils.degToRad(FOV / 2)) / canvas.clientHeight;
-    const right = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0);
-    const up = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 1);
+  function shift(dx, dy) {       // movement of the target for a pointer movement in pixels
+    const perPixel = 2 * goal.dist * Math.tan(rad(FOV / 2)) / canvas.clientHeight;
+    const { right, up } = axes(goal.az, goal.el);
     return right.multiplyScalar(-dx * perPixel).addScaledVector(up, dy * perPixel);
   }
-  function zoom(factor, x, y) {
-    const w = canvas.clientWidth, h = canvas.clientHeight;
-    const before = screenToWorld(x - w / 2, y - h / 2);
-    view.dist = Math.min(20 * radius, Math.max(0.5, view.dist * factor));
-    place();
-    const after = screenToWorld(x - w / 2, y - h / 2);
-    view.target.add(after.sub(before));
-    need();
+  function zoom(factor, x, y) {       // what is under the pointer at x, y stays there
+    const w = canvas.clientWidth, h = canvas.clientHeight, before = goal.dist;
+    goal.dist = Math.min(20 * radius, Math.max(0.5, before * factor));
+    goal.target.add(shift(x - w / 2, y - h / 2).multiplyScalar(1 - before / goal.dist));
+  }
+  const ray = new THREE.Raycaster();
+  function pick(x, y) {       // the point of the model under the pointer, or null
+    ray.setFromCamera(new THREE.Vector2(2 * x / canvas.clientWidth - 1, 1 - 2 * y / canvas.clientHeight), camera);
+    const targets = [];
+    for (const key in levels) {
+      if (!levels[key].group.visible) continue;
+      for (const holder of levels[key].meshes) if (holder.visible) targets.push(holder.children[0]);
+    }
+    const hit = ray.intersectObjects(targets, false).find((h) => plane.distanceToPoint(h.point) >= 0);
+    return hit ? hit.point : null;
   }
   canvas.addEventListener("contextmenu", (e) => e.preventDefault());
   canvas.addEventListener("pointerdown", (e) => {
     canvas.setPointerCapture(e.pointerId);
-    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY, pan: e.button !== 0 || e.shiftKey });
+    const pan = e.button !== 0 || e.shiftKey;
+    // a drag turns the view about the point of the model that was under the pointer when the drag began
+    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY, pan, about: pan ? null : pick(e.clientX, e.clientY) });
     pinch = 0;
   });
   canvas.addEventListener("pointerup", (e) => { pointers.delete(e.pointerId); pinch = 0; });
@@ -344,34 +525,32 @@
       const gap = Math.hypot(a.x - b.x, a.y - b.y);
       if (pinch > 0 && gap > 0) zoom(pinch / gap, (a.x + b.x) / 2, (a.y + b.y) / 2);
       pinch = gap;
-      view.target.add(screenToWorld(dx / 2, dy / 2));
+      goal.target.add(shift(dx / 2, dy / 2));
     } else if (p.pan) {
-      view.target.add(screenToWorld(dx, dy));
+      goal.target.add(shift(dx, dy));
     } else {
-      view.az -= dx * 0.006;
-      view.el = Math.min(TOP, Math.max(-1.45, view.el + dy * 0.006));
+      // the target keeps its place as the eye sees it from the point `about`: that point stays where it is in the window
+      const about = p.about || goal.target.clone();
+      const from = axes(goal.az, goal.el), off = goal.target.clone().sub(about);
+      const x = off.dot(from.right), y = off.dot(from.up), z = off.dot(from.dir);
+      goal.az -= dx * 0.006;
+      goal.el = Math.min(TOP, Math.max(-1.45, goal.el + dy * 0.006));
+      const to = axes(goal.az, goal.el);
+      goal.target.copy(about).addScaledVector(to.right, x).addScaledVector(to.up, y).addScaledVector(to.dir, z);
     }
-    need();
+    go(DRAG);
   });
   canvas.addEventListener("wheel", (e) => {
     e.preventDefault();
     zoom(Math.exp(Math.sign(e.deltaY) * Math.min(Math.abs(e.deltaY), 120) * 0.0016), e.clientX, e.clientY);
+    go(WHEEL);
   }, { passive: false });
-  const ray = new THREE.Raycaster();
   canvas.addEventListener("dblclick", (e) => {
-    const p = new THREE.Vector2(2 * e.clientX / canvas.clientWidth - 1, 1 - 2 * e.clientY / canvas.clientHeight);
-    ray.setFromCamera(p, camera);
-    const targets = [];
-    for (const key in levels) {
-      if (!levels[key].group.visible) continue;
-      for (const holder of levels[key].meshes) if (holder.visible) targets.push(holder.children[0]);
-    }
-    const hit = ray.intersectObjects(targets, false).find((h) => plane.distanceToPoint(h.point) >= 0);
+    const hit = pick(e.clientX, e.clientY);
     if (!hit) return;
-    const eye = camera.position.clone();
-    view.target.copy(hit.point);
-    if (!view.ortho) view.dist = Math.max(0.5, eye.distanceTo(hit.point));
-    need();
+    if (!view.ortho) goal.dist = Math.max(0.5, camera.position.distanceTo(hit));
+    goal.target.copy(hit);
+    go(EASE);
   });
 
   // ---------------------------------------------------------------- panel
@@ -399,7 +578,7 @@
     }
     scene.traverse((o) => { if (o.userData.cap) o.visible = on; });
     placeSource();
-    need();
+    change();
   }
   function range(axis) {
     return axis === "z" ? [bounds.min.z - 0.05, bounds.max.z + 0.05] : axis === "x" ? [bounds.min.x - 0.1, bounds.max.x + 0.1]
@@ -443,8 +622,10 @@
     scene.traverse((o) => {
       if (o.userData.edges === "own") o.visible = on && !(all && wholes[o.userData.of]);
       else if (o.userData.edges === "whole") o.visible = on && all && catBoxes[o.userData.of].checked;
+      else if (o.userData.edges === "contour") o.visible = on;
     });
-    need();
+    ground.position.z = shown().min.z - 0.002;      // under the lowest storey in view
+    change();
   }
   function setLevels(keys) {
     for (const key in levels) {
@@ -456,7 +637,7 @@
   function setShadows(on) {
     sun.castShadow = on;
     $("shadows").checked = on;
-    need();
+    change();
   }
   function plan(key) {
     setLevels([key]);
@@ -507,7 +688,8 @@
     $("categories").append(row);
   }
   $("edges").addEventListener("change", syncEdges);
-  $("shadows").addEventListener("change", (e) => { sun.castShadow = e.target.checked; need(); });
+  $("shadows").addEventListener("change", (e) => { sun.castShadow = e.target.checked; change(); });
+  $("ao").addEventListener("change", need);
   $("source").addEventListener("change", (e) => {
     for (const key in levels) if (levels[key].source) levels[key].source.visible = e.target.checked;
     need();
@@ -581,34 +763,61 @@
   }
 
   // ---------------------------------------------------------------- loop
-  function frame() {
+  const LATE = 0.066;       // seconds: a frame that takes longer came late
+  let last = performance.now();
+  let finer = 0;        // frames since the last change in which only the shade got finer
+  let drawn = false;    // the frame before this one was drawn
+  let late = 0;         // frames in a row that came late
+  function frame(now) {
     requestAnimationFrame(frame);
-    if (!dirty) return;
-    dirty = false;
-    place();
-    renderer.render(scene, camera);
-    placeLabels();
+    const gap = (now - last) / 1000;
+    last = now;
+    if (moving) follow(Math.min(0.05, gap));
+    const refine = !dirty && !light && finer < REFINE && shading();
+    if (drawn && !light) {      // `gap` is the time that the frame before took; more than a second: a pause, not a frame
+      late = gap > LATE && gap < 1 ? late + 1 : 0;
+      if (late >= 10) lighten();
+    }
+    drawn = dirty || refine;
+    if (dirty) {
+      dirty = false;
+      finer = 0;
+      draw(false);
+    } else if (refine) {
+      finer += 1;
+      draw(true);
+    }
   }
   resize();
   applySection();
   syncEdges();
   setView("sw");
-  frame();
+  arrive();
+  requestAnimationFrame(frame);
 
   // for scripted checks of this page
   window.viewer = {
     setView, setLevels, setSection, setCategory, plan, ifcFile,
     look(target, az, el, dist, parallel) {
-      view.target.set(target[0], target[1], target[2]);
-      view.az = az; view.el = Math.min(TOP, el); view.dist = dist; view.ortho = !!parallel;
+      goal.target.set(target[0], target[1], target[2]);
+      goal.az = az; goal.el = Math.min(TOP, el); goal.dist = dist; view.ortho = !!parallel;
       $("ortho").checked = view.ortho;
-      need();
+      arrive();
     },
     toggle(id, on) { const el = $(id); el.checked = on; el.dispatchEvent(new Event("change")); },
     origin: D.origin,
     ready: true,
     scene, renderer, sun,
-    render() { dirty = false; place(); renderer.render(scene, camera); placeLabels(); },
+    get camera() { return camera; },
+    get light() { return light; },
+    // The picture now, with the view at its goal. With no argument: the picture at rest, the shade as fine as it gets.
+    render(frames = REFINE) {
+      arrive();
+      dirty = false;
+      draw(false);
+      if (ao !== null && $("ao").checked) for (let i = 0; i < frames; i++) draw(true);
+      finer = frames;
+    },
   };
 })();
 </script>
