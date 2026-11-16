@@ -57,6 +57,18 @@ outlines in an area drawing that shows the plan as an external reference, and th
 a reference. The drawings of one storey are read as one drawing, so they must have the same coordinates.
 A drawing of which almost no line lies near the gross outline of the storey stops the run.
 
+A set can hold two plans of one storey, for example the plan for facility management and the plan of the
+architect. Read as one drawing, their walls stand beside each other. The room outlines say which drawing is the
+plan: they were drawn on its wall faces.
+
+- Two drawings on whose lines most of the room outlines lie are two plans. The one that the drawing with the
+  outlines names as an external reference is read, and the other is not. With no such reference, the run stops:
+  give the storey one of them.
+- A drawing with lines along nearly all room outlines, but not under them, shows the same walls at another
+  place. It is not read when another drawing is the plan and the drawing with the outlines does not name it.
+
+The report names each drawing that is not read, with the reason. Every other drawing of the storey is read.
+
 The `[input]` table of the project file changes this convention:
 
 | Key | Meaning | Default |

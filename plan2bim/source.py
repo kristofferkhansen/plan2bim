@@ -12,7 +12,8 @@ of Norwegian drawings for facility management:
 - every other layer                             building linework
 
 A storey can have several drawings that share their coordinates, for example an area drawing with the
-outlines and the plan drawing that it references. They are read as one drawing.
+outlines and the plan drawing that it references. They are read as one drawing. A second plan of the
+storey is not read (`_beside_the_plan`).
 
 Building lines are read from LWPOLYLINE, POLYLINE (2D), LINE, ARC and CIRCLE. All of them become
 polylines with bulges. What else lies on a layer that the reader uses is counted and reported, apart from
@@ -28,7 +29,7 @@ import shutil
 import subprocess
 from collections import Counter
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import ezdxf
 import numpy as np
@@ -46,6 +47,11 @@ FAR = 10_000.0          # mm; a line this far outside every gross outline is a f
 THROUGH = 1_000.0       # mm; a straight line that ends this far outside on both sides runs through the building
 AXES = 3                # lines through the building that make a layer of which they are most a layer of axes
 ELSEWHERE = 0.05        # share of the lines of a drawing near the gross outline, under which it has other coordinates
+STEP = 200.0            # mm between the points of a room outline at which a drawing is tested
+ON = 5.0                # mm; a room outline this near a line of a drawing lies on it
+NEAR = 500.0            # mm; a room outline this near a line of a drawing has that line along it
+FITS = 0.5              # share of the room outlines on the lines of a drawing, from which it is a plan of the storey
+ALONG = 0.9             # share of the room outlines with a line along them, from which a drawing shows the same walls
 LISTED = 30             # layers that a message names
 
 
@@ -152,17 +158,24 @@ def read(key: str, files: dict[str, Path], inp: Input) -> Drawing:
     several = len(files) > 1
     buckets = {"lines": d.lines, "rooms": d.rooms, "gross": d.gross, "inner": d.inner}
     number, name, wing = inp.room_number.upper(), inp.room_name.upper(), inp.room_wing.upper()
-    unread: Counter[tuple[str, str]] = Counter()     # on a layer that the reader uses, of a kind it does not read
+    unread: dict[str, Counter[tuple[str, str]]] = {}     # on a layer that the reader uses, of a kind it does not read
     layers: Counter[str] = Counter()
     references: list[str] = []                       # drawings that these drawings reference
+    named: set[str] = set()                          # the drawings with outlines and those they reference, in lower case
     lines_of: dict[str, range] = {}                  # the building lines of each drawing, as indexes of d.lines
+    labels_of: dict[str, range] = {}
     for file, dxf in files.items():
         doc = document(dxf, file)
         said = INSUNITS.get(doc.header.get("$INSUNITS", 0))
         if said and said != inp.unit:
             d.notes.append(f"{file if several else 'the drawing'} says that its unit is {said}; it is read in {inp.unit}, "
                            "as the project file says")
-        references += [plain(block.name) for block in doc.blocks if block.block is not None and block.block.is_xref]
+        shown = [(plain(block.name), PureWindowsPath(plain(block.block.dxf.get("xref_path", ""))).stem)
+                 for block in doc.blocks if block.block is not None and block.block.is_xref]
+        references += [name for name, _ in shown]
+        unread[file] = Counter()
+        outlines = len(d.rooms) + len(d.gross) + len(d.inner)
+        first_label = len(d.labels)
         content: dict[str, str] = {}
         first = len(d.lines)
         for e in doc.modelspace():
@@ -181,7 +194,7 @@ def read(key: str, files: dict[str, Path], inp: Input) -> Drawing:
                     is_number = what == "room_number_text"
                     d.labels.append(Label(at.x * k, at.y * k, text if is_number else "", "" if is_number else text, "", handle))
                 else:
-                    unread[(t, layer)] += 1
+                    unread[file][(t, layer)] += 1
                 continue
             bucket = buckets[what]
             linetype = e.dxf.get("linetype", "BYLAYER")
@@ -208,8 +221,11 @@ def read(key: str, files: dict[str, Path], inp: Input) -> Drawing:
                 d.labels.append(Label(e.dxf.insert.x * k, e.dxf.insert.y * k, a.get(number, ""), a.get(name, ""),
                                       a.get(wing, ""), handle))
             elif not (bucket is d.lines and t in ANNOTATION):
-                unread[(t, layer)] += 1
+                unread[file][(t, layer)] += 1
         lines_of[file] = range(first, len(d.lines))
+        labels_of[file] = range(first_label, len(d.labels))
+        if len(d.rooms) + len(d.gross) + len(d.inner) > outlines:
+            named.update((Path(file).stem.lower(), *(name.lower() for pair in shown for name in pair)))
 
     names = _and(list(files))
     found = ", ".join(f"{layer} ({n})" for layer, n in layers.most_common(LISTED)) or "none"
@@ -221,6 +237,16 @@ def read(key: str, files: dict[str, Path], inp: Input) -> Drawing:
         raise InputError(f'storey {key}: {names} {"hold" if several else "holds"} no gross outline on layer '
                          f'{" or ".join(inp.gross)}. {where} If the outlines are in a drawing of their own, give the '
                          "storey that drawing too.")
+    left = _beside_the_plan(key, d, lines_of, named)
+    if left:
+        d.notes += left.values()
+        kept = [(file, [d.lines[i] for i in own]) for file, own in lines_of.items() if file not in left]
+        d.labels[:] = [d.labels[i] for file, own in labels_of.items() if file not in left for i in own]
+        d.lines[:] = [pl for _, own in kept for pl in own]
+        lines_of, at = {}, 0
+        for file, own in kept:
+            lines_of[file], at = range(at, at + len(own)), at + len(own)
+        names = _and(list(lines_of))
     drawn = len(d.lines)
     _building_lines(key, d, lines_of)
     if not d.lines:
@@ -232,10 +258,59 @@ def read(key: str, files: dict[str, Path], inp: Input) -> Drawing:
         raise InputError(f'storey {key}: {names} {"hold" if several else "holds"} no building lines on layer '
                          f'{" or ".join(inp.lines)}. {where} If the walls are in a drawing of their own, give the storey '
                          f"that drawing too.{others}")
-    if unread:
-        kinds = ", ".join(f"{n} {t} on layer {layer}" for (t, layer), n in unread.most_common())
+    rest = sum((n for file, n in unread.items() if file not in left), Counter())
+    if rest:
+        kinds = ", ".join(f"{n} {t} on layer {layer}" for (t, layer), n in rest.most_common())
         d.notes.append(f"not read, because the reader does not take this kind of entity on that layer: {kinds}")
     return d
+
+
+def _path(pl: Poly) -> LineString:
+    """The polyline through its vertices. An arc is its chord."""
+    return (LineString([(x, y) for x, y, _ in (*pl.pts, *(pl.pts[:1] if pl.closed else ()))])
+            if len(pl.pts) > 1 else LineString())
+
+
+def _beside_the_plan(key: str, d: Drawing, lines_of: dict[str, range], named: set[str]) -> dict[str, str]:
+    """The drawings of a storey that are not read, each with the reason. `named` holds, in lower case, the
+    drawings with outlines and the drawings that they reference.
+
+    A set can hold two plans of one storey, for example the plan for facility management and the plan of the
+    architect. Read as one drawing, their walls stand beside each other, a few millimetres apart or in another
+    state of the building. The room outlines say which drawing is the plan: they were drawn on its wall faces.
+
+    - Two drawings on whose lines the room outlines lie are two plans. The one that the drawing with the
+      outlines references is read. With no such reference, the run stops: nothing says which one to read.
+    - A drawing with lines along nearly all room outlines, but not under them, is a plan at another place.
+      It is not read when another drawing is the plan and the drawing with the outlines does not reference it.
+
+    Every other drawing is read: one that shows something else has lines along few room outlines.
+    """
+    drawings = [file for file, own in lines_of.items() if len(own)]
+    outlines = [p for p in map(_path, d.rooms or d.gross) if not p.is_empty]
+    if len(drawings) < 2 or not outlines:
+        return {}
+    marks = shapely.points(np.concatenate([shapely.get_coordinates(
+        shapely.line_interpolate_point(p, np.arange(0.0, p.length, STEP))) for p in outlines]))
+    on, near = {}, {}
+    for file in drawings:
+        tree = shapely.STRtree([_path(d.lines[i]) for i in lines_of[file]])
+        on[file], near[file] = (len(np.unique(tree.query(marks, predicate="dwithin", distance=reach)[0])) / len(marks)
+                                for reach in (ON, NEAR))
+    plans = [file for file in drawings if on[file] >= FITS]
+    chosen = [file for file in plans if Path(file).stem.lower() in named] or plans
+    if len(chosen) > 1 and not any(Path(file).stem.lower() in named for file in chosen):
+        raise InputError(f"storey {key}: {_and(chosen)} are {len(chosen)} plans of the storey: the room outlines lie on "
+                         f"the lines of each ({', '.join(f'{on[file]:.0%}' for file in chosen)}). Read as one drawing, "
+                         "their walls would stand beside each other. Give the storey one of them.")
+    left = {file: f"{file} is not read: it shows the same walls as {_and(chosen)}, the plan that goes with the outlines "
+                  "of the storey" for file in plans if file not in chosen}
+    for file in drawings:
+        if chosen and file not in plans and near[file] >= ALONG and Path(file).stem.lower() not in named:
+            left[file] = (f"{file} is not read: it shows the walls of the storey at another place than the room "
+                          f"outlines. {on[file]:.0%} of the room outlines lie on its lines, and {on[chosen[0]]:.0%} on "
+                          f"those of {chosen[0]}")
+    return left
 
 
 def _building_lines(key: str, d: Drawing, lines_of: dict[str, range]) -> None:
@@ -252,8 +327,7 @@ def _building_lines(key: str, d: Drawing, lines_of: dict[str, range]) -> None:
     gross = unary_union([p if p.is_valid else p.buffer(0) for p in rings])
     if gross.is_empty or not d.lines:
         return
-    paths = np.array([LineString([(x, y) for x, y, _ in (*pl.pts, *(pl.pts[:1] if pl.closed else ()))])
-                      if len(pl.pts) > 1 else LineString() for pl in d.lines])
+    paths = np.array([_path(pl) for pl in d.lines])
     far = ~shapely.intersects(gross.buffer(FAR), paths)
     straight = np.array([len(pl.pts) == 2 and not pl.closed and abs(pl.pts[0][2]) < 1e-9 for pl in d.lines])
     beside = gross.buffer(THROUGH)

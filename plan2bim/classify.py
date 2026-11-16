@@ -469,7 +469,7 @@ def cut_through(arr: Arrangement, w: Window, walls: set[int]) -> None:
                     f.kind, f.why, f.solid = "niche", f"window {w.id}", None
                     w.niche.append(f.id)
                 elif rest.area < f.mass.area - 1.0:
-                    f.solid, f.why = rest, f"cut for window {w.id}"
+                    f.solid, f.why = _areal(rest), f"cut for window {w.id}"
         # the cut starts at the extent of the bay, which is not its edge to the last fraction of a millimetre
         w.bay = unary_union([w.bay, cut]).buffer(SEAM, join_style="mitre").buffer(-SEAM, join_style="mitre")
         w.carved += depth
@@ -552,6 +552,14 @@ def rough_opening(arr: Arrangement, door: Door) -> None:
     door.rough = fr.rect(sl, sr, lo, hi)
     for j in door.jambs:
         faces[j].kind, faces[j].why = "jamb", f"door {door.id}"
+
+
+def _areal(geom: BaseGeometry) -> BaseGeometry:
+    """The part of a geometry that has an area. A cut along an edge of a face leaves a line or a point of it,
+    and GEOS cannot overlay a geometry of lines and areas."""
+    if geom.geom_type in ("Polygon", "MultiPolygon"):
+        return geom
+    return unary_union([g for g in getattr(geom, "geoms", ()) if g.geom_type in ("Polygon", "MultiPolygon")])
 
 
 # ------------------------------------------------------------------ openings without a door
@@ -787,7 +795,7 @@ def classify(project: Project, level: Level, arr: Arrangement, stair_areas: list
             if f.kind != "sliver" and part >= 0.8 * f.area:
                 f.kind, f.why, f.solid = "shaft", "cell marked with a cross", None
             elif f.kind in SOLID and part > 1.0:
-                f.solid, f.why = f.mass.difference(cell), "cut for a shaft"
+                f.solid, f.why = _areal(f.mass.difference(cell)), "cut for a shaft"
 
     doors = pair_leaves(leaves)
     gross = level.gross_all
@@ -802,7 +810,7 @@ def classify(project: Project, level: Level, arr: Arrangement, stair_areas: list
                 if rest.area < 0.02 * f.area:
                     f.kind, f.why, f.solid = "gap", f"door {d.id}", None
                 elif rest.area < f.mass.area - 1.0:
-                    f.solid, f.why = rest, f"cut for door {d.id}"
+                    f.solid, f.why = _areal(rest), f"cut for door {d.id}"
         if cut > 0.05 * d.rough.area:
             d.notes.append(f"the wall is drawn across this door: {cut / 1e6:.2f} m2 of plan cut out of it")
     for w in windows:

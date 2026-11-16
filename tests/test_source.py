@@ -92,6 +92,43 @@ def test_drawings_of_one_storey_are_read_as_one_and_must_have_the_same_coordinat
         source.read("1", {"area.dxf": area}, Input())
 
 
+def test_storey_with_two_plans_is_read_from_the_plan_of_its_outlines(tmp_path):
+    """Beside the outlines: the plan that they were drawn on, the plan of the architect, the same plan 250 mm
+    away, and a drawing of pipes."""
+    def lines(name: str, layer: str, points: list[tuple[float, float]]) -> Path:
+        doc = ezdxf.new("R2018")
+        doc.header["$INSUNITS"] = 4
+        doc.modelspace().add_lwpolyline(points, close=True, dxfattribs={"layer": layer})
+        doc.saveas(tmp_path / name)
+        return tmp_path / name
+
+    def walls(name: str, layer: str, at: float = 0.0) -> Path:      # the gross outline of `drawing`, moved by `at`
+        return lines(name, layer, [(at, at), (at + 1000, at), (at + 1000, at + 1000), (at, at + 1000)])
+
+    def read(*plans: Path, references: tuple[str, ...] = ()) -> source.Drawing:
+        area = ezdxf.readfile(drawing(tmp_path, lambda msp: None))
+        for name in references:
+            area.add_xref_def(rf".\2 BYGNING\{name}.dwg", name.lower())
+        area.saveas(tmp_path / "area.dxf")
+        return source.read("1", {"area.dxf": tmp_path / "area.dxf", **{p.name: p for p in plans}}, Input())
+
+    plan, architect = walls("Plan_01.dxf", "Walls"), walls("architect.dxf", "A-WALL")
+    moved, pipes = walls("moved.dxf", "Moved", 250.0), lines("pipes.dxf", "Pipes", [(500, 480), (500, 520)])
+
+    d = read(architect, plan, moved, pipes, references=("Plan_01",))
+    assert sorted(pl.layer for pl in d.lines) == ["Pipes", "Walls"]
+    assert d.notes == [
+        "architect.dxf is not read: it shows the same walls as Plan_01.dxf, the plan that goes with the outlines of the "
+        + "storey",
+        "moved.dxf is not read: it shows the walls of the storey at another place than the room outlines. 0% of the room "
+        + "outlines lie on its lines, and 100% on those of Plan_01.dxf"]
+
+    # the outlines name the pipes and no plan: the one plan of the storey is read, whatever its name
+    assert sorted(pl.layer for pl in read(architect, pipes, references=("pipes",)).lines) == ["A-WALL", "Pipes"]
+    with pytest.raises(InputError, match=r"architect\.dxf and Plan_01\.dxf are 2 plans of the storey.*Give the storey one"):
+        read(architect, plan)
+
+
 @pytest.mark.parametrize("mirrored", [False, True])
 def test_arc_is_the_arc_that_is_drawn(tmp_path, mirrored):
     def draw(msp):
