@@ -29,9 +29,21 @@ docker run --rm --user "$(id -u):$(id -g)" -v "$PWD":/work plan2bim build /work/
 | `plan2bim export PROJECT` | Builds the model, checks it and writes its IFC file only. `-o FILE` (default: `NAME.ifc` in the current directory), `--strict`, `-q`. |
 | `plan2bim check PROJECT` | Checks the project file and builds nothing. It reports all problems at once. |
 | `plan2bim inspect DRAWING` | Lists the layers, the kinds of entity and the unit of a drawing. Use it for a drawing with other layer names. |
+| `plan2bim serve` | Runs the web service: upload the drawings, build, look at the model, save its IFC file. `--host`, `--port`, `--store`, `--build-timeout`, `--dev-user NAME`. |
 
 The project file holds the drawings, the storey elevations, the stairs and every assumption that is
 not in the drawings. It is TOML or JSON. `example/example.toml` shows all fields.
+
+## Web service
+
+```sh
+uv run plan2bim serve --dev-user "$USER"        # http://127.0.0.1:8080, no sign-in, projects in ./plan2bim-data
+```
+
+The page takes one drawing for each storey and the level of each floor. It builds the model, shows it and
+gives its IFC file. Without `--dev-user`, the service takes the user from the headers of the authentication
+that stands before it, and refuses a request that has none. Do not make the service reachable without such
+an authentication before it.
 
 The outputs go to the `out` directory of the project. `NAME` is the name of the project file without its suffix.
 
@@ -92,6 +104,7 @@ No public drawing has the area layers, so these tests read drawings and build no
 | `plan2bim/stairs.py`, `assemble.py`, `model.py` | Stairs, heights, the model as vertical prisms |
 | `plan2bim/mesh.py`, `web.py`, `viewer.html`, `ifc.py` | Closed solids, the viewer, the IFC file |
 | `plan2bim/verify.py`, `qa.py` | Checks of the finished model, review plots |
+| `plan2bim/service.py`, `store.py`, `site/` | The web service, where it keeps projects, its page |
 
 `docs/plan2bim.md` gives the method, the assumptions, the checks and the tools.
 

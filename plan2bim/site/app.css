@@ -1,0 +1,69 @@
+:root {
+  color-scheme: light dark;
+  --fg: #1c2024; --muted: #5d6670; --bg: #f6f7f8; --card: #fff; --line: #d5dae0; --accent: #1f5fbf;
+  --pass: #1a7f4b; --warn: #a15c00; --fail: #b3261e;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --fg: #e6e8ea; --muted: #9aa3ad; --bg: #15181b; --card: #1e2226; --line: #363c43; --accent: #7fb0ff;
+          --pass: #5fd092; --warn: #e6a94f; --fail: #ff8a80; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; font: 15px/1.45 system-ui, sans-serif; color: var(--fg); background: var(--bg); }
+header { display: flex; gap: 16px; align-items: baseline; padding: 10px 20px; background: var(--card);
+         border-bottom: 1px solid var(--line); }
+header .brand { font-weight: 700; font-size: 17px; color: var(--fg); text-decoration: none; }
+header .grow { flex: 1; color: var(--muted); }
+main { max-width: 1180px; margin: 0 auto; padding: 20px; }
+h1 { font-size: 22px; margin: 0 0 12px; }
+h2 { font-size: 16px; margin: 22px 0 8px; }
+a { color: var(--accent); }
+p.lead, .muted { color: var(--muted); }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 16px; margin: 0 0 16px; }
+.row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.title { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-bottom: 12px; }
+.title h1 { margin: 0; }
+button, a.button { font: inherit; padding: 7px 14px; border-radius: 6px; border: 1px solid var(--line);
+                   background: var(--card); color: var(--fg); cursor: pointer; text-decoration: none; display: inline-block; }
+button.main, a.button.main { background: var(--accent); border-color: var(--accent); color: #fff; }
+@media (prefers-color-scheme: dark) { button.main, a.button.main { color: #10141a; } }
+button.danger { color: var(--fail); }
+button.small { padding: 2px 8px; }
+button:disabled { opacity: .55; cursor: default; }
+table { border-collapse: collapse; width: 100%; }
+th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+th { font-weight: 600; color: var(--muted); font-size: 13px; }
+tr.link { cursor: pointer; }
+tr.link:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+input, select, textarea { font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--line);
+                          border-radius: 5px; padding: 5px 8px; max-width: 100%; }
+td input[type=text] { width: 100%; }
+input.number, td input.number { width: 110px; }
+input.wrong { border-color: var(--fail); }
+.sheet { overflow-x: auto; }
+.sheet td input.name { min-width: 8em; }
+textarea { width: 100%; min-height: 150px; font-family: ui-monospace, monospace; font-size: 13px; }
+label.field { display: flex; flex-direction: column; gap: 3px; font-size: 13px; color: var(--muted); }
+label.field.wide { flex: 1 1 320px; }
+label.field.wide input { width: 100%; }
+details { margin: 10px 0; }
+summary { cursor: pointer; font-weight: 600; }
+details > .row, details > p, details > textarea, details > ul, details > pre { margin-top: 10px; }
+.badge { font-size: 12.5px; font-weight: 600; padding: 2px 9px; border-radius: 10px; border: 1px solid currentColor; }
+.badge.pass { color: var(--pass); } .badge.warn { color: var(--warn); }
+.badge.fail, .badge.error, .badge.rejected { color: var(--fail); } .badge.building { color: var(--accent); }
+ul.problems { color: var(--fail); margin: 8px 0; padding-left: 20px; }
+.caution p { color: var(--warn); margin: 8px 0; }
+ul.help { color: var(--muted); font-size: 13px; margin: 10px 0 14px; padding-left: 20px; }
+ul.help b { color: var(--fg); font-weight: 600; }
+ul.notes { margin: 8px 0; padding-left: 20px; max-height: 320px; overflow: auto; }
+ul.notes li.fail { color: var(--fail); }
+pre { white-space: pre-wrap; margin: 0; font: 13px/1.45 ui-monospace, monospace; }
+iframe.viewer { width: 100%; height: max(480px, calc(100vh - 260px)); border: 1px solid var(--line); border-radius: 8px;
+                background: #fff; display: block; }
+.plots { display: flex; flex-wrap: wrap; gap: 12px; }
+.plots a { text-align: center; font-size: 13px; }
+.plots img { display: block; width: 240px; height: 170px; object-fit: contain; background: #fff;
+             border: 1px solid var(--line); border-radius: 6px; }
+.spinner { width: 14px; height: 14px; border: 2px solid var(--line); border-top-color: var(--accent);
+           border-radius: 50%; animation: turn 1s linear infinite; display: inline-block; }
+@keyframes turn { to { transform: rotate(360deg); } }

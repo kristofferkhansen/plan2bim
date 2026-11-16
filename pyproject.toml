@@ -18,8 +18,22 @@ dependencies = [
 [project.scripts]
 plan2bim = "plan2bim.cli:main"
 
+[project.optional-dependencies]
+web = [
+    "azure-identity>=1.17",
+    "azure-storage-blob>=12.20",
+    "fastapi>=0.115",
+    "python-multipart>=0.0.9",
+    "uvicorn>=0.30",
+]
+
 [dependency-groups]
-dev = ["pytest>=8", "ruff>=0.9"]
+dev = [
+    "httpx2>=2.16.0",    # the test client of the web service
+    "plan2bim[web]",     # the tests run the web service
+    "pytest>=8",
+    "ruff>=0.9",
+]
 
 [build-system]
 requires = ["hatchling"]

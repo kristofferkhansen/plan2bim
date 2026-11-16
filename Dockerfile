@@ -1,10 +1,16 @@
-# plan2bim with LibreDWG, so that it reads DWG and DXF.
+# plan2bim with LibreDWG, so that it reads DWG and DXF. One image: the command line and the web service.
 #
 #   docker build -t plan2bim .
 #   docker run --rm --user "$(id -u):$(id -g)" -v "$PWD":/work plan2bim build /work/PROJECT.toml
 #
-# The container needs no network. For drawings from people you do not know, run it with
+# The container needs no network for `build`. For drawings from people you do not know, run it with
 # `--network none --read-only --tmpfs /tmp --memory 4g`: a DWG reader is a parser of untrusted files.
+#
+# With no command, the container runs the web service on port 8080. It trusts the identity headers of
+# the authentication that stands before it, so do not publish the port without that.
+# On your own machine, with no sign-in:
+#
+#   docker run --rm -p 127.0.0.1:8080:8080 -v plan2bim-data:/data plan2bim serve --host 0.0.0.0 --dev-user "$USER"
 
 FROM python:3.12-slim-bookworm AS libredwg
 ARG LIBREDWG=0.14
@@ -27,10 +33,14 @@ ENV PATH=/app/.venv/bin:/opt/libredwg/bin:$PATH \
     LD_LIBRARY_PATH=/opt/libredwg/lib \
     UV_COMPILE_BYTECODE=1 \
     MPLCONFIGDIR=/tmp/matplotlib \
-    XDG_CACHE_HOME=/tmp
+    XDG_CACHE_HOME=/tmp \
+    PLAN2BIM_STORE=/data
 WORKDIR /app
 COPY pyproject.toml uv.lock README.md LICENSE ./
 COPY plan2bim plan2bim
-RUN uv sync --frozen --no-dev --no-editable
+RUN uv sync --frozen --no-dev --no-editable --extra web \
+    && mkdir /data && chown 1000:1000 /data
 USER 1000:1000
+EXPOSE 8080
 ENTRYPOINT ["plan2bim"]
+CMD ["serve", "--host", "0.0.0.0", "--port", "8080"]

@@ -267,3 +267,6 @@ A classification that was made with other stairs, or with none, is a preview. Ma
 
 The project file is the contract. `plan2bim.project.parse` takes the same definition as a dictionary, so a
 program can send it as JSON. Paths of drawings are relative to the directory that the program gives.
+
+`plan2bim/service.py` is such a program: a web service that takes the definition and the drawings from a
+page, runs `plan2bim build` for each project, and serves the viewer and the IFC file.

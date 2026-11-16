@@ -17,3 +17,6 @@ build/
 
 # The drawings of the example building are part of the repository
 !example/*.dxf
+
+# Projects of `plan2bim serve`
+plan2bim-data/

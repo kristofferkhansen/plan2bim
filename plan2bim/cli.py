@@ -4,6 +4,7 @@
   plan2bim export PROJECT     build the model, check it, and write its IFC file only
   plan2bim check PROJECT      check a project file, build nothing
   plan2bim inspect DRAWING    list the layers, the kinds of entity and the unit of a drawing
+  plan2bim serve              run the web service: upload drawings, build, look at the model, save its IFC file
 
 `build` writes, under the output directory of the project:
   NAME.html     the model in a viewer, one file, opens from disk; "Save as IFC" in it gives NAME.ifc
@@ -21,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 import tempfile
 from collections import Counter
@@ -37,7 +39,11 @@ log = logging.getLogger("plan2bim")
 
 class _Elapsed(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
-        return f"{record.relativeCreated / 1000.0:6.1f} s  {record.getMessage()}"
+        line = f"{record.relativeCreated / 1000.0:6.1f} s  {record.getMessage()}"
+        if not record.exc_info:
+            return line
+        # the traceback comes first: the last line stays the one that says what happened
+        return f"{self.formatException(record.exc_info)}\n{line}"
 
 
 def _status(report, strict: bool) -> int:
@@ -97,6 +103,21 @@ def _inspect(args: argparse.Namespace) -> int:
                 print(f"  {layer:<28} {kind:<12} {n:>7}   {reads.get(layer.casefold(), '')}")
     return 0
 
+def _serve(args: argparse.Namespace) -> int:
+    try:
+        import uvicorn
+
+        from .service import create_app
+        from .store import open_store
+    except ImportError as e:
+        raise InputError(f"the web service needs the package {e.name}. Install plan2bim with its `web` extra, "
+                         "for example `uv sync --extra web`.") from e
+    app = create_app(open_store(args.store), dev_user=args.dev_user, build_timeout=args.build_timeout)
+    log.info("the projects are kept in %s", args.store)
+    uvicorn.run(app, host=args.host, port=args.port, access_log=False)
+    return 0
+
+
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="plan2bim", description="Floor plan drawings to a 3D building model.",
@@ -119,6 +140,16 @@ def main(argv: list[str] | None = None) -> int:
     check.add_argument("project", help="project file, .toml or .json")
     inspect = sub.add_parser("inspect", help="list the layers, the kinds of entity and the unit of a drawing")
     inspect.add_argument("drawing", nargs="+", help="DWG or DXF file")
+    serve = sub.add_parser("serve", help="run the web service")
+    serve.add_argument("--host", default="127.0.0.1", help="address to listen on (default: this machine only)")
+    serve.add_argument("--port", type=int, default=8080)
+    serve.add_argument("--store", default=os.environ.get("PLAN2BIM_STORE", "plan2bim-data"),
+                       help="where the projects are kept: a directory, or the URL of a blob container in Azure "
+                            "(default: $PLAN2BIM_STORE, else the directory plan2bim-data)")
+    serve.add_argument("--build-timeout", type=float, default=float(os.environ.get("PLAN2BIM_BUILD_TIMEOUT", "600")),
+                       help="seconds after which a build is stopped (default: $PLAN2BIM_BUILD_TIMEOUT, else 600)")
+    serve.add_argument("--dev-user", metavar="NAME",
+                       help="for a developer's machine: nobody signs in, and every request is the request of NAME")
     args = parser.parse_args(argv)
 
     handler = logging.StreamHandler(sys.stderr)
@@ -126,7 +157,8 @@ def main(argv: list[str] | None = None) -> int:
     log.addHandler(handler)
     log.setLevel(logging.WARNING if getattr(args, "quiet", False) else logging.INFO)
     try:
-        return {"build": _build, "export": _export, "check": _check, "inspect": _inspect}[args.command](args)
+        return {"build": _build, "export": _export, "check": _check, "inspect": _inspect,
+                "serve": _serve}[args.command](args)
     except InputError as e:
         for line in str(e).splitlines():
             print(f"error: {line}", file=sys.stderr)
